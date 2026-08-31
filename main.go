@@ -8,8 +8,19 @@ import (
 )
 
 //go:embed skills/kaiten-proxy/SKILL.md
-var embeddedSkill string
+var embeddedKaitenProxySkill string
+
+//go:embed skills/kaiten-card-history/SKILL.md
+var embeddedCardHistorySkill string
+
+//go:embed skills/kaiten-card-comments/SKILL.md
+var embeddedCardCommentsSkill string
 
 func main() {
-	os.Exit(cli.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, embeddedSkill))
+	skills := map[string]string{
+		"kaiten-proxy":         embeddedKaitenProxySkill,
+		"kaiten-card-history":  embeddedCardHistorySkill,
+		"kaiten-card-comments": embeddedCardCommentsSkill,
+	}
+	os.Exit(cli.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, skills))
 }

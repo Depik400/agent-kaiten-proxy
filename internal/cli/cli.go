@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,19 +22,19 @@ import (
 
 var newKaitenClient = kaiten.NewClient
 
-func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, embeddedSkill string) int {
+func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, skills map[string]string) int {
 	if len(args) == 0 {
 		writeHelp(stdout, "")
 		return apperr.ExitOK
 	}
-	if err := run(args, stdin, stdout, embeddedSkill); err != nil {
+	if err := run(args, stdin, stdout, skills); err != nil {
 		output.Error(stderr, err)
 		return apperr.ExitCode(err)
 	}
 	return apperr.ExitOK
 }
 
-func run(args []string, stdin io.Reader, stdout io.Writer, embeddedSkill string) error {
+func run(args []string, stdin io.Reader, stdout io.Writer, skills map[string]string) error {
 	if args[0] == "--help" || args[0] == "-h" {
 		writeHelp(stdout, "")
 		return nil
@@ -78,6 +79,10 @@ func run(args []string, stdin io.Reader, stdout io.Writer, embeddedSkill string)
 		return runLaneCards(args[1:], stdout)
 	case "card":
 		return runCard(args[1:], stdout)
+	case "card-comments":
+		return runCardComments(args[1:], stdout)
+	case "card-history":
+		return runCardHistory(args[1:], stdout)
 	case "spaces":
 		return runSpaces(args[1:], stdout)
 	case "boards":
@@ -91,7 +96,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, embeddedSkill string)
 	case "comment-card":
 		return runCommentCard(args[1:], stdout)
 	case "install-skill":
-		return runInstallSkill(args[1:], stdout, embeddedSkill)
+		return runInstallSkill(args[1:], stdout, skills)
 	default:
 		return apperr.New(apperr.CodeInvalidArgs, "unknown command", map[string]string{"command": args[0]})
 	}
@@ -409,6 +414,8 @@ func runCard(args []string, stdout io.Writer) error {
 	fs := newFlagSet("card")
 	idText := fs.String("id", "", "card id")
 	hostName := fs.String("host-name", "", "configured host name")
+	includeComments := fs.Bool("include-comments", false, "include card comments")
+	includeHistory := fs.Bool("include-history", false, "include card history and baselines")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
@@ -426,7 +433,88 @@ func runCard(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return output.JSON(stdout, card)
+	if !*includeComments && !*includeHistory {
+		return output.JSON(stdout, card)
+	}
+	out := map[string]any{"card": card}
+	if *includeComments {
+		comments, err := client.CardComments(ctx, id)
+		if err != nil {
+			return err
+		}
+		out["comments"] = comments
+	}
+	if *includeHistory {
+		history, err := fetchCardHistory(client, ctx, id)
+		if err != nil {
+			return err
+		}
+		out["history"] = history
+	}
+	return output.JSON(stdout, out)
+}
+
+func runCardComments(args []string, stdout io.Writer) error {
+	fs := newFlagSet("card-comments")
+	idText := fs.String("id", "", "card id")
+	hostName := fs.String("host-name", "", "configured host name")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	id, err := parsePositiveInt("id", *idText)
+	if err != nil {
+		return err
+	}
+	client, _, err := clientForHost(*hostName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	comments, err := client.CardComments(ctx, id)
+	if err != nil {
+		return err
+	}
+	return output.JSON(stdout, comments)
+}
+
+func runCardHistory(args []string, stdout io.Writer) error {
+	fs := newFlagSet("card-history")
+	idText := fs.String("id", "", "card id")
+	hostName := fs.String("host-name", "", "configured host name")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	id, err := parsePositiveInt("id", *idText)
+	if err != nil {
+		return err
+	}
+	client, _, err := clientForHost(*hostName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	history, err := fetchCardHistory(client, ctx, id)
+	if err != nil {
+		return err
+	}
+	return output.JSON(stdout, history)
+}
+
+func fetchCardHistory(client *kaiten.Client, ctx context.Context, id int) (map[string]any, error) {
+	locationHistory, err := client.CardLocationHistory(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	baselines, err := client.CardBaselines(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"location_history": locationHistory,
+		"baselines":        baselines,
+	}, nil
 }
 
 func runSpaces(args []string, stdout io.Writer) error {
@@ -631,14 +719,11 @@ func runCommentCard(args []string, stdout io.Writer) error {
 	return output.JSON(stdout, comment)
 }
 
-func runInstallSkill(args []string, stdout io.Writer, embeddedSkill string) error {
+func runInstallSkill(args []string, stdout io.Writer, skills map[string]string) error {
 	fs := newFlagSet("install-skill")
 	targetDir := fs.String("target-dir", "", "Codex skills directory")
 	if err := parse(fs, args); err != nil {
 		return err
-	}
-	if strings.TrimSpace(embeddedSkill) == "" {
-		return apperr.New(apperr.CodeKaitenAPI, "embedded skill is empty", nil)
 	}
 	base := *targetDir
 	if base == "" {
@@ -648,22 +733,39 @@ func runInstallSkill(args []string, stdout io.Writer, embeddedSkill string) erro
 		}
 		base = filepath.Join(home, ".codex", "skills")
 	}
-	skillDir := filepath.Join(base, "kaiten-proxy")
-	if err := os.MkdirAll(skillDir, 0o700); err != nil {
-		return apperr.Wrap(apperr.CodeConfig, "create skill dir", err, map[string]string{"path": skillDir})
+	names := make([]string, 0, len(skills))
+	for name := range skills {
+		names = append(names, name)
 	}
-	skillPath := filepath.Join(skillDir, "SKILL.md")
-	if err := os.WriteFile(skillPath, []byte(embeddedSkill), 0o600); err != nil {
-		return apperr.Wrap(apperr.CodeConfig, "write skill", err, map[string]string{"path": skillPath})
+	sort.Strings(names)
+	installed := make([]string, 0, len(names))
+	for _, name := range names {
+		content := strings.TrimSpace(skills[name])
+		if content == "" {
+			continue
+		}
+		skillDir := filepath.Join(base, name)
+		if err := os.MkdirAll(skillDir, 0o700); err != nil {
+			return apperr.Wrap(apperr.CodeConfig, "create skill dir", err, map[string]string{"path": skillDir})
+		}
+		skillPath := filepath.Join(skillDir, "SKILL.md")
+		if err := os.WriteFile(skillPath, []byte(content), 0o600); err != nil {
+			return apperr.Wrap(apperr.CodeConfig, "write skill", err, map[string]string{"path": skillPath})
+		}
+		installed = append(installed, skillPath)
+	}
+	if len(installed) == 0 {
+		return apperr.New(apperr.CodeKaitenAPI, "embedded skills are empty", nil)
 	}
 	return output.JSON(stdout, map[string]any{
 		"status": "ok",
-		"path":   skillPath,
+		"paths":  installed,
 		"recommendations": []string{
 			"Run: agent-kaiten-proxy config",
 			"If no host is configured, run: agent-kaiten-proxy bootstrap --interactive",
 			"Configure useful aliases with alias-space, alias-board and alias-lane.",
 			"Ask Codex to use the kaiten-proxy skill for Kaiten card analysis.",
+			"Use kaiten-card-comments and kaiten-card-history skills to load comments or history for one card.",
 		},
 	})
 }
@@ -1014,7 +1116,9 @@ Commands:
   cards          Print filtered cards.
   space-cards    Print cards from a configured space alias.
   lane-cards     Print cards from a configured lane alias.
-  card           Print one card.
+  card           Print one card, optionally with comments and history.
+  card-comments  Print comments for a card.
+  card-history   Print card movement history and baselines.
   spaces         Print spaces.
   boards         Print boards for a space.
   lanes          Print lanes for a board.
@@ -1031,6 +1135,15 @@ var commandHelp = map[string]string{
 `,
 	"cards": `Usage:
   agent-kaiten-proxy cards [--space-id <id>|--space <alias>] [--board-id <id>|--board <alias>] [--lane-id <id>|--lane <alias>] [--states <csv>] [--include-description]
+`,
+	"card": `Usage:
+  agent-kaiten-proxy card --id <card_id> [--include-comments] [--include-history]
+`,
+	"card-comments": `Usage:
+  agent-kaiten-proxy card-comments --id <card_id>
+`,
+	"card-history": `Usage:
+  agent-kaiten-proxy card-history --id <card_id>
 `,
 	"install-skill": `Usage:
   agent-kaiten-proxy install-skill [--target-dir <dir>]

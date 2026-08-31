@@ -144,6 +144,30 @@ func (c *Client) ListLanes(ctx context.Context, boardID int) ([]json.RawMessage,
 	return lanes, nil
 }
 
+func (c *Client) CardComments(ctx context.Context, id int) ([]json.RawMessage, error) {
+	var comments []json.RawMessage
+	if err := c.get(ctx, fmt.Sprintf("/cards/%d/comments", id), nil, &comments); err != nil {
+		return nil, err
+	}
+	return comments, nil
+}
+
+func (c *Client) CardLocationHistory(ctx context.Context, id int) ([]json.RawMessage, error) {
+	var history []json.RawMessage
+	if err := c.get(ctx, fmt.Sprintf("/cards/%d/location-history", id), nil, &history); err != nil {
+		return nil, err
+	}
+	return history, nil
+}
+
+func (c *Client) CardBaselines(ctx context.Context, id int) ([]json.RawMessage, error) {
+	var baselines []json.RawMessage
+	if err := c.get(ctx, fmt.Sprintf("/cards/%d/baselines", id), nil, &baselines); err != nil {
+		return nil, err
+	}
+	return baselines, nil
+}
+
 func (c *Client) CreateCard(ctx context.Context, input map[string]any) (json.RawMessage, error) {
 	return c.postJSON(ctx, "/cards", input)
 }

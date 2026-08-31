@@ -2,7 +2,6 @@
 name: kaiten-proxy
 description: Work with Kaiten through the local agent-kaiten-proxy CLI. Use when Codex needs to inspect Kaiten spaces, boards, lanes, cards, aliases, current-user cards, analyze cards from a saved space or lane alias, create cards, update cards, or add card comments through Kaiten API.
 ---
-
 # Kaiten Proxy
 
 Use `agent-kaiten-proxy` as the only interface to Kaiten. It returns JSON on stdout and JSON errors on stderr.
@@ -34,6 +33,20 @@ agent-kaiten-proxy lane-cards --lane <alias> --details --include-description
 ```
 
 Analyze the returned card JSON, including title, description, owner, members, responsible user, board, lane, state, blockers, due dates, and comments counters when present.
+
+For a deep analysis of one card, always pull the card together with its comments and history so you can understand how the requirements (ТЗ) changed over time and which decisions or remarks were made in the discussion:
+
+```bash
+agent-kaiten-proxy card --id <card_id> --include-comments --include-history
+```
+
+The response contains three parts:
+
+- `card` — the full current card (title, description, owner, members, responsible user, state, lane, due dates, blockers).
+- `comments` — chronological comments (author, created, text, `edited`, `internal`). Use them to find decisions, remarks, clarifications and changed requirements.
+- `history` — card lifecycle: `location_history` (every movement between boards/columns/lanes with author and `changed` timestamp) and `baselines` (planned start/end changes over time).
+
+Reconstruct the timeline from `history` and `comments`, compare comment claims with the current description, and report how the ТЗ and requirements evolved.
 
 If the user does not have an alias, help configure one:
 
@@ -77,7 +90,17 @@ One card:
 
 ```bash
 agent-kaiten-proxy card --id <card_id>
+agent-kaiten-proxy card --id <card_id> --include-comments --include-history
 ```
+
+Comments or history for one card:
+
+```bash
+agent-kaiten-proxy card-comments --id <card_id>
+agent-kaiten-proxy card-history --id <card_id>
+```
+
+The dedicated `kaiten-card-comments` and `kaiten-card-history` skills cover these two commands separately.
 
 Create a card:
 

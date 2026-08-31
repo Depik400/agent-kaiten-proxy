@@ -62,6 +62,21 @@ agent-kaiten-proxy lane-cards --lane bugs --details --include-description
 agent-kaiten-proxy card --id 123
 ```
 
+Deep analysis of one card — pull the card together with its comments and history:
+
+```bash
+agent-kaiten-proxy card --id 123 --include-comments --include-history
+```
+
+The response contains `card` (current state), `comments` (discussion/decisions) and `history` (`location_history` — every move between lanes/columns, and `baselines` — planned date changes). Use it to understand how the ТЗ and requirements changed over time.
+
+Comments or history alone:
+
+```bash
+agent-kaiten-proxy card-comments --id 123
+agent-kaiten-proxy card-history --id 123
+```
+
 Write operations:
 
 ```bash
@@ -76,7 +91,11 @@ agent-kaiten-proxy comment-card --id 123 --text "Investigated by agent"
 agent-kaiten-proxy install-skill
 ```
 
-The command writes the embedded skill to `~/.codex/skills/kaiten-proxy/SKILL.md` and prints recommendations for use.
+The command writes the embedded skills to `~/.codex/skills/` (each in its own directory) and prints recommendations for use:
+
+- `kaiten-proxy` — full Kaiten workflow, including deep card analysis with comments and history.
+- `kaiten-card-history` — loads the history of one card (`card-history`).
+- `kaiten-card-comments` — loads the comments of one card (`card-comments`).
 
 ## Exit Codes
 

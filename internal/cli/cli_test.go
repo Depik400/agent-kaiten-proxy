@@ -17,12 +17,32 @@ import (
 func TestInstallSkill(t *testing.T) {
 	target := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"install-skill", "--target-dir", target}, bytes.NewReader(nil), &stdout, &stderr, "---\nname: kaiten-proxy\ndescription: test\n---\n")
+	code := Run([]string{"install-skill", "--target-dir", target}, bytes.NewReader(nil), &stdout, &stderr, map[string]string{
+		"kaiten-proxy": "---\nname: kaiten-proxy\ndescription: test\n---\n",
+	})
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(target, "kaiten-proxy", "SKILL.md")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInstallSkillMultiple(t *testing.T) {
+	target := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"install-skill", "--target-dir", target}, bytes.NewReader(nil), &stdout, &stderr, map[string]string{
+		"kaiten-proxy":         "---\nname: kaiten-proxy\n---\n",
+		"kaiten-card-history":  "---\nname: kaiten-card-history\n---\n",
+		"kaiten-card-comments": "---\nname: kaiten-card-comments\n---\n",
+	})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	for _, name := range []string{"kaiten-proxy", "kaiten-card-history", "kaiten-card-comments"} {
+		if _, err := os.Stat(filepath.Join(target, name, "SKILL.md")); err != nil {
+			t.Fatalf("missing skill %s: %v", name, err)
+		}
 	}
 }
 
@@ -95,11 +115,85 @@ func TestMyCardsDedup(t *testing.T) {
 	}
 }
 
+func TestCardIncludeCommentsAndHistory(t *testing.T) {
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/api/latest/cards/123":
+			return cliJSONResponse(http.StatusOK, `{"id":123,"title":"card","description":"desc"}`), nil
+		case "/api/latest/cards/123/comments":
+			return cliJSONResponse(http.StatusOK, `[{"id":1,"text":"approved","author":{"id":1,"full_name":"Me"}}]`), nil
+		case "/api/latest/cards/123/location-history":
+			return cliJSONResponse(http.StatusOK, `[{"id":5,"lane_id":22,"author_id":1,"changed":"2024-01-01T00:00:00Z"}]`), nil
+		case "/api/latest/cards/123/baselines":
+			return cliJSONResponse(http.StatusOK, `[{"id":123,"planned_start":"2024-03-01T09:00:00.000Z"}]`), nil
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	out := runOK(t, []string{"card", "--id", "123", "--include-comments", "--include-history"})
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(out, &data); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"card", "comments", "history"} {
+		if len(data[key]) == 0 {
+			t.Fatalf("output missing %q: %s", key, out)
+		}
+	}
+	if !bytes.Contains(out, []byte("location_history")) || !bytes.Contains(out, []byte("baselines")) {
+		t.Fatalf("history missing parts: %s", out)
+	}
+}
+
+func TestCardComments(t *testing.T) {
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/api/latest/cards/7/comments" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `[{"id":1,"text":"remark","author":{"id":1,"full_name":"Me"}}]`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	out := runOK(t, []string{"card-comments", "--id", "7"})
+	if !bytes.Contains(out, []byte(`"remark"`)) {
+		t.Fatalf("comments output: %s", out)
+	}
+}
+
+func TestCardHistory(t *testing.T) {
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/api/latest/cards/7/location-history":
+			return cliJSONResponse(http.StatusOK, `[{"id":5,"lane_id":22,"changed":"2024-01-01T00:00:00Z"}]`), nil
+		case "/api/latest/cards/7/baselines":
+			return cliJSONResponse(http.StatusOK, `[{"id":7,"planned_start":"2024-03-01T09:00:00.000Z"}]`), nil
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	out := runOK(t, []string{"card-history", "--id", "7"})
+	if !bytes.Contains(out, []byte("location_history")) || !bytes.Contains(out, []byte("baselines")) {
+		t.Fatalf("history output: %s", out)
+	}
+}
+
 func TestUpdateCardRequiresField(t *testing.T) {
 	path := writeTestConfig(t, "https://example.kaiten.ru")
 	t.Setenv(config.EnvKey, path)
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"update-card", "--id", "1"}, bytes.NewReader(nil), &stdout, &stderr, "")
+	code := Run([]string{"update-card", "--id", "1"}, bytes.NewReader(nil), &stdout, &stderr, map[string]string{})
 	if code != 2 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -122,7 +216,7 @@ func writeTestConfig(t *testing.T, url string) string {
 func runOK(t *testing.T, args []string) []byte {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := Run(args, bytes.NewReader(nil), &stdout, &stderr, "skill")
+	code := Run(args, bytes.NewReader(nil), &stdout, &stderr, map[string]string{"kaiten-proxy": "skill"})
 	if code != 0 {
 		t.Fatalf("%v: code=%d stderr=%s", args, code, stderr.String())
 	}
