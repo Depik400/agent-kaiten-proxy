@@ -186,7 +186,12 @@ func (c *Client) UpdateCard(ctx context.Context, id int, input map[string]any) (
 }
 
 func (c *Client) CommentCard(ctx context.Context, id int, text string) (json.RawMessage, error) {
-	return c.postJSON(ctx, fmt.Sprintf("/cards/%d/comments", id), map[string]any{"text": text})
+	return c.CreateComment(ctx, id, map[string]any{"text": text})
+}
+
+// CreateComment posts a comment with an arbitrary payload (text plus an optional "files" array).
+func (c *Client) CreateComment(ctx context.Context, id int, input map[string]any) (json.RawMessage, error) {
+	return c.postJSON(ctx, fmt.Sprintf("/cards/%d/comments", id), input)
 }
 
 func (c *Client) CardFiles(ctx context.Context, cardID int) ([]json.RawMessage, error) {

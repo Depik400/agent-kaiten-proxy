@@ -342,6 +342,88 @@ func TestCreateCardRejectsLaneNameWithLaneID(t *testing.T) {
 	}
 }
 
+func TestCommentCardWithFileUpload(t *testing.T) {
+	var commentBody map[string]any
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/latest/cards/7/files":
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatalf("parse multipart: %v", err)
+			}
+			if r.MultipartForm.File["file"][0].Filename != "log.txt" {
+				t.Fatalf("filename = %s", r.MultipartForm.File["file"][0].Filename)
+			}
+			return cliJSONResponse(http.StatusOK, `{"id":42,"name":"log.txt","url":"https://files.example/log"}`), nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/latest/cards/7/comments":
+			data, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(data, &commentBody); err != nil {
+				t.Fatalf("comment body: %v", err)
+			}
+			return cliJSONResponse(http.StatusOK, `{"id":100,"text":"see log"}`), nil
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "log.txt")
+	if err := os.WriteFile(src, []byte("line one\nline two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	runOK(t, []string{"comment-card", "--id", "7", "--text", "see log", "--file", src})
+
+	if commentBody["text"] != "see log" {
+		t.Fatalf("comment text = %#v", commentBody["text"])
+	}
+	files, ok := commentBody["files"].([]any)
+	if !ok || len(files) != 1 {
+		t.Fatalf("comment files = %#v", commentBody["files"])
+	}
+	if f := files[0].(map[string]any); f["id"] != float64(42) || f["name"] != "log.txt" {
+		t.Fatalf("attached file = %#v", f)
+	}
+}
+
+func TestCommentCardWithFileID(t *testing.T) {
+	var commentBody map[string]any
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/latest/cards/7/files":
+			return cliJSONResponse(http.StatusOK, `[{"id":42,"name":"log.txt","url":"u"},{"id":43,"name":"other.txt","url":"u"}]`), nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/latest/cards/7/comments":
+			data, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(data, &commentBody)
+			return cliJSONResponse(http.StatusOK, `{"id":100}`), nil
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	runOK(t, []string{"comment-card", "--id", "7", "--file-id", "43"})
+	files := commentBody["files"].([]any)
+	if len(files) != 1 || files[0].(map[string]any)["id"] != float64(43) {
+		t.Fatalf("comment files = %#v", commentBody["files"])
+	}
+}
+
+func TestCommentCardRequiresTextOrFile(t *testing.T) {
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"comment-card", "--id", "7"}, bytes.NewReader(nil), &stdout, &stderr, map[string]string{})
+	if code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
 func TestCardFiles(t *testing.T) {
 	restore := stubClient(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/api/latest/cards/50/files" {

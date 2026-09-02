@@ -133,6 +133,20 @@ missing name returns an error listing the available names. Use `card-files` firs
 A non-text file (or one larger than `--max-bytes`, default 5 MiB) is rejected — do not try to
 work around it.
 
+Attach a file to a comment (write operation — confirm first):
+
+```bash
+# upload a local text file and attach it to the comment
+agent-kaiten-proxy comment-card --id <card_id> --text "<comment>" --file ./run.log
+
+# reference a file that is already attached to the card
+agent-kaiten-proxy comment-card --id <card_id> --text "<comment>" --file-id <file_id>
+```
+
+`--text` is optional when a file is attached. `--file` follows the same text-only limits as
+`attach-file` (it uploads the file to the card, then links it in the comment). `--file` and
+`--file-id` may be combined to attach several files.
+
 ## Rules
 
 - Never guess space, board, lane or column ids. Resolve them from `boards`, `lanes`, `columns` output or from a URL the user gave.

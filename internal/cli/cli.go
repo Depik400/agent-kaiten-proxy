@@ -896,6 +896,9 @@ func runCommentCard(args []string, stdout io.Writer) error {
 	fs := newFlagSet("comment-card")
 	idText := fs.String("id", "", "card id")
 	text := fs.String("text", "", "comment text")
+	filePath := fs.String("file", "", "path to a local text file to upload and attach to the comment")
+	fileIDText := fs.String("file-id", "", "id of a file already attached to the card to reference in the comment")
+	name := fs.String("name", "", "attachment name for --file (defaults to the file base name)")
 	hostName := fs.String("host-name", "", "configured host name")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -904,16 +907,46 @@ func runCommentCard(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(*text) == "" {
-		return apperr.New(apperr.CodeInvalidArgs, "--text is required", nil)
+	hasFile := strings.TrimSpace(*filePath) != "" || *fileIDText != ""
+	if strings.TrimSpace(*text) == "" && !hasFile {
+		return apperr.New(apperr.CodeInvalidArgs, "--text is required (or attach a file with --file/--file-id)", nil)
 	}
 	client, _, err := clientForHost(*hostName)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	comment, err := client.CommentCard(ctx, id, *text)
+
+	var files []json.RawMessage
+	if *fileIDText != "" {
+		existing, err := client.CardFiles(ctx, id)
+		if err != nil {
+			return err
+		}
+		file, err := selectCardFile(existing, *fileIDText, "")
+		if err != nil {
+			return err
+		}
+		files = append(files, file)
+	}
+	if strings.TrimSpace(*filePath) != "" {
+		content, attachName, err := readTextFileForUpload(*filePath, *name)
+		if err != nil {
+			return err
+		}
+		file, err := client.AttachFile(ctx, id, attachName, content)
+		if err != nil {
+			return err
+		}
+		files = append(files, file)
+	}
+
+	input := map[string]any{"text": *text}
+	if len(files) > 0 {
+		input["files"] = files
+	}
+	comment, err := client.CreateComment(ctx, id, input)
 	if err != nil {
 		return err
 	}
@@ -963,26 +996,9 @@ func runAttachFile(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(*filePath) == "" {
 		return apperr.New(apperr.CodeInvalidArgs, "--file is required", nil)
 	}
-	info, err := os.Stat(*filePath)
+	content, attachName, err := readTextFileForUpload(*filePath, *name)
 	if err != nil {
-		return apperr.Wrap(apperr.CodeInvalidArgs, "read file", err, map[string]string{"file": *filePath})
-	}
-	if info.IsDir() {
-		return apperr.New(apperr.CodeInvalidArgs, "--file is a directory", map[string]string{"file": *filePath})
-	}
-	if info.Size() > maxTextFileBytes {
-		return apperr.New(apperr.CodeInvalidArgs, "file is too large for a text attachment", map[string]any{"file": *filePath, "size": info.Size(), "max_bytes": maxTextFileBytes})
-	}
-	content, err := os.ReadFile(*filePath)
-	if err != nil {
-		return apperr.Wrap(apperr.CodeInvalidArgs, "read file", err, map[string]string{"file": *filePath})
-	}
-	if !isTextual(content) {
-		return apperr.New(apperr.CodeInvalidArgs, "only text files are supported for now", map[string]string{"file": *filePath})
-	}
-	attachName := strings.TrimSpace(*name)
-	if attachName == "" {
-		attachName = filepath.Base(*filePath)
+		return err
 	}
 	client, _, err := clientForHost(*hostName)
 	if err != nil {
@@ -1115,6 +1131,33 @@ func selectCardFile(files []json.RawMessage, fileIDText, name string) (json.RawM
 		return nil, apperr.New(apperr.CodeInvalidArgs, "file name is ambiguous", map[string]any{"query": name, "available": available})
 	}
 	return picked[0], nil
+}
+
+// readTextFileForUpload reads a local file, enforces the text-only limits, and
+// returns its bytes plus the attachment name (nameOverride or the file base name).
+func readTextFileForUpload(path, nameOverride string) ([]byte, string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, "", apperr.Wrap(apperr.CodeInvalidArgs, "read file", err, map[string]string{"file": path})
+	}
+	if info.IsDir() {
+		return nil, "", apperr.New(apperr.CodeInvalidArgs, "--file is a directory", map[string]string{"file": path})
+	}
+	if info.Size() > maxTextFileBytes {
+		return nil, "", apperr.New(apperr.CodeInvalidArgs, "file is too large for a text attachment", map[string]any{"file": path, "size": info.Size(), "max_bytes": maxTextFileBytes})
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", apperr.Wrap(apperr.CodeInvalidArgs, "read file", err, map[string]string{"file": path})
+	}
+	if !isTextual(content) {
+		return nil, "", apperr.New(apperr.CodeInvalidArgs, "only text files are supported for now", map[string]string{"file": path})
+	}
+	name := strings.TrimSpace(nameOverride)
+	if name == "" {
+		name = filepath.Base(path)
+	}
+	return content, name, nil
 }
 
 // isTextual reports whether content can be treated as a UTF-8 text file:
@@ -1578,7 +1621,7 @@ Commands:
   columns        Print columns for a board.
   create-card    Create a card on any board, lane and column.
   update-card    Update a card, including moving it between lanes and columns.
-  comment-card   Add a card comment.
+  comment-card   Add a card comment, optionally with a text file attached.
   card-files     List files attached to a card.
   attach-file    Attach a local text file to a card.
   read-file      Read the text content of a file attached to a card.
@@ -1601,6 +1644,14 @@ var commandHelp = map[string]string{
 `,
 	"card-history": `Usage:
   agent-kaiten-proxy card-history --id <card_id>
+`,
+	"comment-card": `Usage:
+  agent-kaiten-proxy comment-card --id <card_id> --text "<comment>"
+  agent-kaiten-proxy comment-card --id <card_id> [--text "<comment>"] --file <path> [--name <attachment name>]
+  agent-kaiten-proxy comment-card --id <card_id> [--text "<comment>"] --file-id <id>
+
+--file uploads a local text file (same text-only limits as attach-file) and attaches it to the comment.
+--file-id references a file already attached to the card. Both may be combined; --text is optional when a file is attached.
 `,
 	"card-files": `Usage:
   agent-kaiten-proxy card-files --id <card_id>

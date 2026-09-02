@@ -96,6 +96,8 @@ agent-kaiten-proxy update-card --id 123 --column-name "IN PROGRESS"
 agent-kaiten-proxy update-card --id 123 --board-id 1040055 --lane-name "Павел Кононов" --column-name "TO DO"
 
 agent-kaiten-proxy comment-card --id 123 --text "Investigated by agent"
+agent-kaiten-proxy comment-card --id 123 --text "Log attached" --file ./run.log
+agent-kaiten-proxy comment-card --id 123 --file-id 4567
 ```
 
 `--lane-name` / `--column-name` match a lane or column title on the board (exact case-insensitive
@@ -112,6 +114,10 @@ agent-kaiten-proxy attach-file --id 123 --file ./notes.md
 agent-kaiten-proxy attach-file --id 123 --file ./log.txt --name run-log.txt
 agent-kaiten-proxy read-file --id 123 --name notes.md
 agent-kaiten-proxy read-file --id 123 --file-id 4567 --max-bytes 1048576
+
+# Attach a file to a comment: --file uploads a local text file, --file-id references an existing card file
+agent-kaiten-proxy comment-card --id 123 --text "Log attached" --file ./run.log
+agent-kaiten-proxy comment-card --id 123 --file-id 4567
 ```
 
 `read-file` prints `{"file": <meta>, "encoding": "utf-8", "bytes": <n>, "content": "<text>"}` and

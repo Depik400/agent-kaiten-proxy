@@ -130,6 +130,7 @@ Attach or read text files on a card (text files only, up to 5 MiB):
 agent-kaiten-proxy card-files --id <card_id>
 agent-kaiten-proxy attach-file --id <card_id> --file ./notes.md
 agent-kaiten-proxy read-file --id <card_id> --name notes.md
+agent-kaiten-proxy comment-card --id <card_id> --text "<comment>" --file ./notes.md
 ```
 
 The dedicated `kaiten-card-edit` skill covers creating and editing cards in detail (parsing a board URL, resolving lane/column by title, moving cards, attaching and reading text files).
