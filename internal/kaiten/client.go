@@ -144,6 +144,14 @@ func (c *Client) ListLanes(ctx context.Context, boardID int) ([]json.RawMessage,
 	return lanes, nil
 }
 
+func (c *Client) ListColumns(ctx context.Context, boardID int) ([]json.RawMessage, error) {
+	var columns []json.RawMessage
+	if err := c.get(ctx, fmt.Sprintf("/boards/%d/columns", boardID), nil, &columns); err != nil {
+		return nil, err
+	}
+	return columns, nil
+}
+
 func (c *Client) CardComments(ctx context.Context, id int) ([]json.RawMessage, error) {
 	var comments []json.RawMessage
 	if err := c.get(ctx, fmt.Sprintf("/cards/%d/comments", id), nil, &comments); err != nil {

@@ -89,6 +89,8 @@ func run(args []string, stdin io.Reader, stdout io.Writer, skills map[string]str
 		return runBoards(args[1:], stdout)
 	case "lanes":
 		return runLanes(args[1:], stdout)
+	case "columns":
+		return runColumns(args[1:], stdout)
 	case "create-card":
 		return runCreateCard(args[1:], stdout)
 	case "update-card":
@@ -592,6 +594,162 @@ func runLanes(args []string, stdout io.Writer) error {
 	return output.JSON(stdout, lanes)
 }
 
+func runColumns(args []string, stdout io.Writer) error {
+	fs := newFlagSet("columns")
+	hostName := fs.String("host-name", "", "configured host name")
+	boardIDText := fs.String("board-id", "", "board id")
+	boardAlias := fs.String("board", "", "board alias")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	target, cfg, err := resolveTarget(*hostName, "", "", *boardIDText, *boardAlias, "", "")
+	if err != nil {
+		return err
+	}
+	if target.BoardID == 0 {
+		return apperr.New(apperr.CodeInvalidArgs, "--board-id or --board is required", nil)
+	}
+	client, _, err := clientForResolvedHost(cfg, target.HostName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	columns, err := client.ListColumns(ctx, target.BoardID)
+	if err != nil {
+		return err
+	}
+	return output.JSON(stdout, columns)
+}
+
+// checkLaneColumnNameConflicts rejects combining a name lookup with an id/alias for the same target.
+func checkLaneColumnNameConflicts(laneIDText, laneAlias, laneName, columnIDText, columnName string) error {
+	if laneName != "" && (laneIDText != "" || laneAlias != "") {
+		return apperr.New(apperr.CodeInvalidArgs, "use only one of --lane-id, --lane or --lane-name", nil)
+	}
+	if columnName != "" && columnIDText != "" {
+		return apperr.New(apperr.CodeInvalidArgs, "use only one of --column-id or --column-name", nil)
+	}
+	return nil
+}
+
+// resolveLaneColumnNames looks up lane and column ids by title on the given board.
+// It only fetches from Kaiten for the names that were actually provided.
+func resolveLaneColumnNames(ctx context.Context, client *kaiten.Client, boardID int, laneName, columnName string, laneID, columnID *int) error {
+	if laneName == "" && columnName == "" {
+		return nil
+	}
+	if boardID == 0 {
+		return apperr.New(apperr.CodeInvalidArgs, "board is required to resolve --lane-name/--column-name", nil)
+	}
+	if laneName != "" {
+		lanes, err := client.ListLanes(ctx, boardID)
+		if err != nil {
+			return err
+		}
+		id, err := matchNamedEntity(lanes, "lane", laneName)
+		if err != nil {
+			return err
+		}
+		*laneID = id
+	}
+	if columnName != "" {
+		columns, err := client.ListColumns(ctx, boardID)
+		if err != nil {
+			return err
+		}
+		id, err := matchNamedEntity(flattenColumns(columns), "column", columnName)
+		if err != nil {
+			return err
+		}
+		*columnID = id
+	}
+	return nil
+}
+
+// flattenColumns expands parent columns so a named subcolumn can also be matched.
+func flattenColumns(columns []json.RawMessage) []json.RawMessage {
+	out := make([]json.RawMessage, 0, len(columns))
+	for _, raw := range columns {
+		out = append(out, raw)
+		var parent struct {
+			Subcolumns []json.RawMessage `json:"subcolumns"`
+		}
+		if err := json.Unmarshal(raw, &parent); err == nil {
+			out = append(out, parent.Subcolumns...)
+		}
+	}
+	return out
+}
+
+// matchNamedEntity resolves a single id from a list of {id,title} objects by title.
+// Exact (case-insensitive) match wins; otherwise a unique substring match is used.
+func matchNamedEntity(items []json.RawMessage, kind, query string) (int, error) {
+	want := strings.ToLower(strings.TrimSpace(query))
+	type entity struct {
+		id    int
+		title string
+	}
+	var all, exact, partial []entity
+	for _, raw := range items {
+		var e struct {
+			ID    int    `json:"id"`
+			Title string `json:"title"`
+		}
+		if err := json.Unmarshal(raw, &e); err != nil {
+			return 0, apperr.Wrap(apperr.CodeKaitenAPI, "decode "+kind, err, nil)
+		}
+		if e.ID == 0 {
+			continue
+		}
+		ent := entity{id: e.ID, title: e.Title}
+		all = append(all, ent)
+		switch title := strings.ToLower(strings.TrimSpace(e.Title)); {
+		case title == want:
+			exact = append(exact, ent)
+		case want != "" && strings.Contains(title, want):
+			partial = append(partial, ent)
+		}
+	}
+	available := make([]string, 0, len(all))
+	for _, e := range all {
+		available = append(available, e.title)
+	}
+	picked := exact
+	if len(picked) == 0 {
+		picked = partial
+	}
+	if len(picked) == 0 {
+		return 0, apperr.New(apperr.CodeNotFound, kind+" not found by name", map[string]any{"query": query, "available": available})
+	}
+	if len(picked) > 1 {
+		matched := make([]string, 0, len(picked))
+		for _, e := range picked {
+			matched = append(matched, e.title)
+		}
+		return 0, apperr.New(apperr.CodeInvalidArgs, kind+" name is ambiguous", map[string]any{"query": query, "matched": matched, "available": available})
+	}
+	return picked[0].id, nil
+}
+
+// cardBoardID reads the board id of an existing card so name lookups work with just --id.
+func cardBoardID(ctx context.Context, client *kaiten.Client, id int) (int, error) {
+	card, err := client.GetCard(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	var data struct {
+		BoardID int `json:"board_id"`
+	}
+	if err := json.Unmarshal(card, &data); err != nil {
+		return 0, apperr.Wrap(apperr.CodeKaitenAPI, "decode card board id", err, nil)
+	}
+	if data.BoardID == 0 {
+		return 0, apperr.New(apperr.CodeKaitenAPI, "card response has no board_id", nil)
+	}
+	return data.BoardID, nil
+}
+
 func runCreateCard(args []string, stdout io.Writer) error {
 	fs := newFlagSet("create-card")
 	hostName := fs.String("host-name", "", "configured host name")
@@ -599,7 +757,9 @@ func runCreateCard(args []string, stdout io.Writer) error {
 	boardAlias := fs.String("board", "", "board alias")
 	laneIDText := fs.String("lane-id", "", "lane id")
 	laneAlias := fs.String("lane", "", "lane alias")
+	laneName := fs.String("lane-name", "", "lane title to resolve on the board")
 	columnIDText := fs.String("column-id", "", "column id")
+	columnName := fs.String("column-name", "", "column title to resolve on the board")
 	title := fs.String("title", "", "card title")
 	description := fs.String("description", "", "card description")
 	responsibleIDText := fs.String("responsible-id", "", "responsible user id")
@@ -615,12 +775,11 @@ func runCreateCard(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if target.BoardID == 0 || target.LaneID == 0 {
-		return apperr.New(apperr.CodeInvalidArgs, "--board-id/--board and --lane-id/--lane are required", nil)
-	}
-	input := map[string]any{"title": *title, "board_id": target.BoardID, "lane_id": target.LaneID}
-	if err := addOptionalCardFields(input, *columnIDText, *description, *responsibleIDText, *ownerIDText, *position); err != nil {
+	if err := checkLaneColumnNameConflicts(*laneIDText, *laneAlias, *laneName, *columnIDText, *columnName); err != nil {
 		return err
+	}
+	if target.BoardID == 0 {
+		return apperr.New(apperr.CodeInvalidArgs, "--board-id/--board is required", nil)
 	}
 	client, _, err := clientForResolvedHost(cfg, target.HostName)
 	if err != nil {
@@ -628,6 +787,20 @@ func runCreateCard(args []string, stdout io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	columnID := 0
+	if err := resolveLaneColumnNames(ctx, client, target.BoardID, *laneName, *columnName, &target.LaneID, &columnID); err != nil {
+		return err
+	}
+	if target.LaneID == 0 {
+		return apperr.New(apperr.CodeInvalidArgs, "--lane-id/--lane/--lane-name is required", nil)
+	}
+	input := map[string]any{"title": *title, "board_id": target.BoardID, "lane_id": target.LaneID}
+	if columnID > 0 {
+		input["column_id"] = columnID
+	}
+	if err := addOptionalCardFields(input, *columnIDText, *description, *responsibleIDText, *ownerIDText, *position); err != nil {
+		return err
+	}
 	card, err := client.CreateCard(ctx, input)
 	if err != nil {
 		return err
@@ -643,7 +816,9 @@ func runUpdateCard(args []string, stdout io.Writer) error {
 	boardAlias := fs.String("board", "", "board alias")
 	laneIDText := fs.String("lane-id", "", "lane id")
 	laneAlias := fs.String("lane", "", "lane alias")
+	laneName := fs.String("lane-name", "", "lane title to resolve on the board")
 	columnIDText := fs.String("column-id", "", "column id")
+	columnName := fs.String("column-name", "", "column title to resolve on the board")
 	title := fs.String("title", "", "card title")
 	description := fs.String("description", "", "card description")
 	responsibleIDText := fs.String("responsible-id", "", "responsible user id")
@@ -659,6 +834,28 @@ func runUpdateCard(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if err := checkLaneColumnNameConflicts(*laneIDText, *laneAlias, *laneName, *columnIDText, *columnName); err != nil {
+		return err
+	}
+	client, _, err := clientForResolvedHost(cfg, target.HostName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	columnID := 0
+	if *laneName != "" || *columnName != "" {
+		boardID := target.BoardID
+		if boardID == 0 {
+			boardID, err = cardBoardID(ctx, client, id)
+			if err != nil {
+				return err
+			}
+		}
+		if err := resolveLaneColumnNames(ctx, client, boardID, *laneName, *columnName, &target.LaneID, &columnID); err != nil {
+			return err
+		}
+	}
 	input := map[string]any{}
 	if *title != "" {
 		input["title"] = *title
@@ -672,18 +869,15 @@ func runUpdateCard(args []string, stdout io.Writer) error {
 	if target.LaneID > 0 {
 		input["lane_id"] = target.LaneID
 	}
+	if columnID > 0 {
+		input["column_id"] = columnID
+	}
 	if err := addOptionalCardFields(input, *columnIDText, "", *responsibleIDText, *ownerIDText, ""); err != nil {
 		return err
 	}
 	if len(input) == 0 {
 		return apperr.New(apperr.CodeInvalidArgs, "at least one editable field is required", nil)
 	}
-	client, _, err := clientForResolvedHost(cfg, target.HostName)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	card, err := client.UpdateCard(ctx, id, input)
 	if err != nil {
 		return err
@@ -721,38 +915,38 @@ func runCommentCard(args []string, stdout io.Writer) error {
 
 func runInstallSkill(args []string, stdout io.Writer, skills map[string]string) error {
 	fs := newFlagSet("install-skill")
-	targetDir := fs.String("target-dir", "", "Codex skills directory")
+	targetDir := fs.String("target-dir", "", "explicit skills directory (overrides --codex/--claude)")
+	codexOnly := fs.Bool("codex", false, "install only into ~/.codex/skills")
+	claudeOnly := fs.Bool("claude", false, "install only into ~/.claude/skills")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
-	base := *targetDir
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return apperr.Wrap(apperr.CodeConfig, "resolve home dir", err, nil)
-		}
-		base = filepath.Join(home, ".codex", "skills")
+	bases, err := installSkillBases(*targetDir, *codexOnly, *claudeOnly)
+	if err != nil {
+		return err
 	}
 	names := make([]string, 0, len(skills))
 	for name := range skills {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	installed := make([]string, 0, len(names))
-	for _, name := range names {
-		content := strings.TrimSpace(skills[name])
-		if content == "" {
-			continue
+	installed := make([]string, 0, len(names)*len(bases))
+	for _, base := range bases {
+		for _, name := range names {
+			content := strings.TrimSpace(skills[name])
+			if content == "" {
+				continue
+			}
+			skillDir := filepath.Join(base, name)
+			if err := os.MkdirAll(skillDir, 0o700); err != nil {
+				return apperr.Wrap(apperr.CodeConfig, "create skill dir", err, map[string]string{"path": skillDir})
+			}
+			skillPath := filepath.Join(skillDir, "SKILL.md")
+			if err := os.WriteFile(skillPath, []byte(content), 0o600); err != nil {
+				return apperr.Wrap(apperr.CodeConfig, "write skill", err, map[string]string{"path": skillPath})
+			}
+			installed = append(installed, skillPath)
 		}
-		skillDir := filepath.Join(base, name)
-		if err := os.MkdirAll(skillDir, 0o700); err != nil {
-			return apperr.Wrap(apperr.CodeConfig, "create skill dir", err, map[string]string{"path": skillDir})
-		}
-		skillPath := filepath.Join(skillDir, "SKILL.md")
-		if err := os.WriteFile(skillPath, []byte(content), 0o600); err != nil {
-			return apperr.Wrap(apperr.CodeConfig, "write skill", err, map[string]string{"path": skillPath})
-		}
-		installed = append(installed, skillPath)
 	}
 	if len(installed) == 0 {
 		return apperr.New(apperr.CodeKaitenAPI, "embedded skills are empty", nil)
@@ -764,10 +958,35 @@ func runInstallSkill(args []string, stdout io.Writer, skills map[string]string) 
 			"Run: agent-kaiten-proxy config",
 			"If no host is configured, run: agent-kaiten-proxy bootstrap --interactive",
 			"Configure useful aliases with alias-space, alias-board and alias-lane.",
-			"Ask Codex to use the kaiten-proxy skill for Kaiten card analysis.",
+			"Ask Codex or Claude to use the kaiten-proxy skill for Kaiten card analysis.",
 			"Use kaiten-card-comments and kaiten-card-history skills to load comments or history for one card.",
+			"Use the kaiten-card-edit skill to create cards on any board/lane/column or apply corrections to a card.",
 		},
 	})
+}
+
+// installSkillBases returns the skills directories to write to.
+// An explicit --target-dir wins; otherwise both ~/.codex/skills and ~/.claude/skills
+// are used unless narrowed with --codex or --claude.
+func installSkillBases(targetDir string, codexOnly, claudeOnly bool) ([]string, error) {
+	if targetDir != "" {
+		if codexOnly || claudeOnly {
+			return nil, apperr.New(apperr.CodeInvalidArgs, "--target-dir cannot be combined with --codex/--claude", nil)
+		}
+		return []string{targetDir}, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, apperr.Wrap(apperr.CodeConfig, "resolve home dir", err, nil)
+	}
+	var bases []string
+	if !claudeOnly {
+		bases = append(bases, filepath.Join(home, ".codex", "skills"))
+	}
+	if !codexOnly {
+		bases = append(bases, filepath.Join(home, ".claude", "skills"))
+	}
+	return bases, nil
 }
 
 type cardFilterFlags struct {
@@ -1122,10 +1341,11 @@ Commands:
   spaces         Print spaces.
   boards         Print boards for a space.
   lanes          Print lanes for a board.
-  create-card    Create a card.
-  update-card    Update a card.
+  columns        Print columns for a board.
+  create-card    Create a card on any board, lane and column.
+  update-card    Update a card, including moving it between lanes and columns.
   comment-card   Add a card comment.
-  install-skill  Install the embedded Codex skill.
+  install-skill  Install the embedded skills into Codex and Claude.
 `
 
 var commandHelp = map[string]string{
@@ -1145,8 +1365,29 @@ var commandHelp = map[string]string{
 	"card-history": `Usage:
   agent-kaiten-proxy card-history --id <card_id>
 `,
+	"lanes": `Usage:
+  agent-kaiten-proxy lanes [--board-id <id>|--board <alias>]
+`,
+	"columns": `Usage:
+  agent-kaiten-proxy columns [--board-id <id>|--board <alias>]
+`,
+	"create-card": `Usage:
+  agent-kaiten-proxy create-card (--board-id <id>|--board <alias>) (--lane-id <id>|--lane <alias>|--lane-name "<title>") --title "<title>" [--description "<text>"] [--column-id <id>|--column-name "<title>"] [--responsible-id <id>] [--owner-id <id>] [--position first|last]
+
+--lane-name and --column-name are matched against the board's lanes/columns by title
+(exact case-insensitive match, otherwise a unique substring match).
+`,
+	"update-card": `Usage:
+  agent-kaiten-proxy update-card --id <card_id> [--title "<title>"] [--description "<text>"] [--board-id <id>|--board <alias>] [--lane-id <id>|--lane <alias>|--lane-name "<title>"] [--column-id <id>|--column-name "<title>"] [--responsible-id <id>] [--owner-id <id>]
+
+--lane-name/--column-name resolve against the card's current board when --board-id/--board is omitted.
+`,
 	"install-skill": `Usage:
-  agent-kaiten-proxy install-skill [--target-dir <dir>]
+  agent-kaiten-proxy install-skill [--target-dir <dir>] [--codex] [--claude]
+
+By default the skills are written to both ~/.codex/skills and ~/.claude/skills.
+Use --codex or --claude to install into only one of them, or --target-dir <dir>
+to write to an explicit directory.
 `,
 }
 

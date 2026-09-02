@@ -46,6 +46,42 @@ func TestInstallSkillMultiple(t *testing.T) {
 	}
 }
 
+func TestInstallSkillDefaultsToCodexAndClaude(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"install-skill"}, bytes.NewReader(nil), &stdout, &stderr, map[string]string{
+		"kaiten-card-edit": "---\nname: kaiten-card-edit\n---\n",
+	})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	for _, dir := range []string{".codex", ".claude"} {
+		p := filepath.Join(home, dir, "skills", "kaiten-card-edit", "SKILL.md")
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("missing %s: %v", p, err)
+		}
+	}
+}
+
+func TestInstallSkillClaudeOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"install-skill", "--claude"}, bytes.NewReader(nil), &stdout, &stderr, map[string]string{
+		"kaiten-proxy": "---\nname: kaiten-proxy\n---\n",
+	})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude", "skills", "kaiten-proxy", "SKILL.md")); err != nil {
+		t.Fatalf("claude skill missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".codex", "skills", "kaiten-proxy", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("codex skill should not exist: %v", err)
+	}
+}
+
 func TestAliasCRUD(t *testing.T) {
 	path := writeTestConfig(t, "https://example.kaiten.ru")
 	t.Setenv(config.EnvKey, path)
@@ -186,6 +222,123 @@ func TestCardHistory(t *testing.T) {
 	out := runOK(t, []string{"card-history", "--id", "7"})
 	if !bytes.Contains(out, []byte("location_history")) || !bytes.Contains(out, []byte("baselines")) {
 		t.Fatalf("history output: %s", out)
+	}
+}
+
+func TestColumns(t *testing.T) {
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/api/latest/boards/10/columns" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `[{"id":7,"title":"TO DO"},{"id":8,"title":"Done"}]`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	out := runOK(t, []string{"columns", "--board", "main"})
+	if !bytes.Contains(out, []byte(`"TO DO"`)) {
+		t.Fatalf("columns output: %s", out)
+	}
+}
+
+func TestCreateCardResolvesLaneAndColumnByName(t *testing.T) {
+	var body map[string]any
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/latest/boards/10/lanes":
+			return cliJSONResponse(http.StatusOK, `[{"id":22,"title":"Павел Кононов"},{"id":23,"title":"Другой"}]`), nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/latest/boards/10/columns":
+			return cliJSONResponse(http.StatusOK, `[{"id":7,"title":"Queue","type":2,"subcolumns":[{"id":9,"title":"TO DO"}]},{"id":8,"title":"Done"}]`), nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/latest/cards":
+			data, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(data, &body); err != nil {
+				t.Fatalf("bad request body: %v", err)
+			}
+			return cliJSONResponse(http.StatusOK, `{"id":555,"title":"New"}`), nil
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	out := runOK(t, []string{"create-card", "--board-id", "10", "--lane-name", "павел кононов", "--column-name", "TO DO", "--title", "New"})
+	if !bytes.Contains(out, []byte(`555`)) {
+		t.Fatalf("create-card output: %s", out)
+	}
+	if body["lane_id"] != float64(22) || body["column_id"] != float64(9) || body["board_id"] != float64(10) {
+		t.Fatalf("resolved body = %#v", body)
+	}
+}
+
+func TestCreateCardAmbiguousColumnName(t *testing.T) {
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/api/latest/boards/10/lanes":
+			return cliJSONResponse(http.StatusOK, `[{"id":22,"title":"Lane"}]`), nil
+		case "/api/latest/boards/10/columns":
+			return cliJSONResponse(http.StatusOK, `[{"id":7,"title":"In progress"},{"id":8,"title":"In review"}]`), nil
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"create-card", "--board-id", "10", "--lane-name", "Lane", "--column-name", "In", "--title", "x"}, bytes.NewReader(nil), &stdout, &stderr, map[string]string{})
+	if code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("ambiguous")) {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestUpdateCardMovesByColumnNameOnCurrentBoard(t *testing.T) {
+	var body map[string]any
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/latest/cards/123":
+			return cliJSONResponse(http.StatusOK, `{"id":123,"board_id":10}`), nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/latest/boards/10/columns":
+			return cliJSONResponse(http.StatusOK, `[{"id":7,"title":"TO DO"},{"id":8,"title":"Done"}]`), nil
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/latest/cards/123":
+			data, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(data, &body); err != nil {
+				t.Fatalf("bad body: %v", err)
+			}
+			return cliJSONResponse(http.StatusOK, `{"id":123}`), nil
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	runOK(t, []string{"update-card", "--id", "123", "--column-name", "Done"})
+	if body["column_id"] != float64(8) {
+		t.Fatalf("patch body = %#v", body)
+	}
+	if _, ok := body["board_id"]; ok {
+		t.Fatalf("board_id should not be sent when unchanged: %#v", body)
+	}
+}
+
+func TestCreateCardRejectsLaneNameWithLaneID(t *testing.T) {
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"create-card", "--board-id", "10", "--lane-id", "22", "--lane-name", "x", "--title", "t"}, bytes.NewReader(nil), &stdout, &stderr, map[string]string{})
+	if code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 }
 

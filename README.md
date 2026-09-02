@@ -46,6 +46,7 @@ agent-kaiten-proxy config
 agent-kaiten-proxy spaces
 agent-kaiten-proxy boards --space-id 1
 agent-kaiten-proxy lanes --board-id 10
+agent-kaiten-proxy columns --board-id 10
 
 agent-kaiten-proxy alias-space set --alias product --space-id 1
 agent-kaiten-proxy alias-board set --alias main --space-id 1 --board-id 10
@@ -80,22 +81,42 @@ agent-kaiten-proxy card-history --id 123
 Write operations:
 
 ```bash
+# Aliased board/lane
 agent-kaiten-proxy create-card --board main --lane bugs --title "Bug title" --description "Details"
+
+# Any board, with the lane and column resolved from plain text (matched by title)
+agent-kaiten-proxy create-card --board-id 1040055 --lane-name "Павел Кононов" --column-name "TO DO" --title "Bug title"
+
+# Raw ids
+agent-kaiten-proxy create-card --board-id 1040055 --lane-id 22 --column-id 7 --title "Bug title"
+
+# Edit a card / move it between lanes and columns (names resolve on the card's current board)
 agent-kaiten-proxy update-card --id 123 --description "Updated details"
+agent-kaiten-proxy update-card --id 123 --column-name "IN PROGRESS"
+agent-kaiten-proxy update-card --id 123 --board-id 1040055 --lane-name "Павел Кононов" --column-name "TO DO"
+
 agent-kaiten-proxy comment-card --id 123 --text "Investigated by agent"
 ```
 
-## Install the Codex Skill
+`--lane-name` / `--column-name` match a lane or column title on the board (exact case-insensitive
+match, otherwise a unique substring match; subcolumn titles are matched too). An ambiguous or
+missing name returns an error listing the available titles.
+
+## Install the Skills
 
 ```bash
-agent-kaiten-proxy install-skill
+agent-kaiten-proxy install-skill            # both ~/.codex/skills/ and ~/.claude/skills/
+agent-kaiten-proxy install-skill --claude   # only ~/.claude/skills/
+agent-kaiten-proxy install-skill --codex    # only ~/.codex/skills/
+agent-kaiten-proxy install-skill --target-dir ./skills-out
 ```
 
-The command writes the embedded skills to `~/.codex/skills/` (each in its own directory) and prints recommendations for use:
+The command writes the embedded skills (each in its own directory) and prints recommendations for use:
 
 - `kaiten-proxy` — full Kaiten workflow, including deep card analysis with comments and history.
 - `kaiten-card-history` — loads the history of one card (`card-history`).
 - `kaiten-card-comments` — loads the comments of one card (`card-comments`).
+- `kaiten-card-edit` — creates cards on any board/lane/column and applies corrections to a card (`create-card`, `update-card`).
 
 ## Exit Codes
 

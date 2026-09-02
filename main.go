@@ -16,11 +16,15 @@ var embeddedCardHistorySkill string
 //go:embed skills/kaiten-card-comments/SKILL.md
 var embeddedCardCommentsSkill string
 
+//go:embed skills/kaiten-card-edit/SKILL.md
+var embeddedCardEditSkill string
+
 func main() {
 	skills := map[string]string{
 		"kaiten-proxy":         embeddedKaitenProxySkill,
 		"kaiten-card-history":  embeddedCardHistorySkill,
 		"kaiten-card-comments": embeddedCardCommentsSkill,
+		"kaiten-card-edit":     embeddedCardEditSkill,
 	}
 	os.Exit(cli.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, skills))
 }

@@ -108,12 +108,23 @@ Create a card:
 agent-kaiten-proxy create-card --board <board_alias> --lane <lane_alias> --title "<title>" --description "<description>"
 ```
 
+Create a card on any board without an alias — resolve the lane and column from plain text:
+
+```bash
+agent-kaiten-proxy lanes --board-id <board_id>
+agent-kaiten-proxy columns --board-id <board_id>
+agent-kaiten-proxy create-card --board-id <board_id> --lane-name "<lane title>" --column-name "<column title>" --title "<title>"
+```
+
 Update a card or comment only when the user explicitly asks to change Kaiten:
 
 ```bash
 agent-kaiten-proxy update-card --id <card_id> --description "<description>"
+agent-kaiten-proxy update-card --id <card_id> --column-name "<column title>"
 agent-kaiten-proxy comment-card --id <card_id> --text "<comment>"
 ```
+
+The dedicated `kaiten-card-edit` skill covers creating and editing cards in detail (parsing a board URL, resolving lane/column by title, moving cards).
 
 ## Safety
 
