@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -188,6 +189,64 @@ func (c *Client) CommentCard(ctx context.Context, id int, text string) (json.Raw
 	return c.postJSON(ctx, fmt.Sprintf("/cards/%d/comments", id), map[string]any{"text": text})
 }
 
+func (c *Client) CardFiles(ctx context.Context, cardID int) ([]json.RawMessage, error) {
+	var files []json.RawMessage
+	if err := c.get(ctx, fmt.Sprintf("/cards/%d/files", cardID), nil, &files); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+// AttachFile uploads a file to a card as multipart/form-data (field name "file").
+func (c *Client) AttachFile(ctx context.Context, cardID int, filename string, content []byte) (json.RawMessage, error) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return nil, apperr.Wrap(apperr.CodeInvalidArgs, "build multipart body", err, nil)
+	}
+	if _, err := part.Write(content); err != nil {
+		return nil, apperr.Wrap(apperr.CodeInvalidArgs, "write multipart body", err, nil)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, apperr.Wrap(apperr.CodeInvalidArgs, "close multipart body", err, nil)
+	}
+	data, err := c.requestRaw(ctx, http.MethodPost, fmt.Sprintf("/cards/%d/files", cardID), &buf, writer.FormDataContentType())
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
+}
+
+// DownloadFile fetches raw bytes from an absolute file URL (a card file's "url").
+// It sends the Kaiten bearer token, which presigned storage URLs simply ignore.
+func (c *Client) DownloadFile(ctx context.Context, fileURL string) ([]byte, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	if err != nil {
+		return nil, "", apperr.Wrap(apperr.CodeInvalidArgs, "build file download request", err, nil)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, "", apperr.Wrap(apperr.CodeKaitenAPI, "download file", err, nil)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", apperr.Wrap(apperr.CodeKaitenAPI, "read downloaded file", err, nil)
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, "", apperr.New(apperr.CodeAuth, "file download authentication failed", map[string]any{"status": resp.StatusCode})
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, "", apperr.New(apperr.CodeNotFound, "file not found", map[string]any{"status": resp.StatusCode})
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", apperr.New(apperr.CodeKaitenAPI, "file download returned non-success status", map[string]any{"status": resp.StatusCode})
+	}
+	return body, resp.Header.Get("Content-Type"), nil
+}
+
 func (c *Client) get(ctx context.Context, path string, values url.Values, dst any) error {
 	data, err := c.request(ctx, http.MethodGet, path, values, nil)
 	if err != nil {
@@ -224,6 +283,15 @@ func (c *Client) doJSON(ctx context.Context, method string, path string, body an
 }
 
 func (c *Client) request(ctx context.Context, method string, path string, values url.Values, bodyReader io.Reader) ([]byte, error) {
+	return c.doRequest(ctx, method, path, values, bodyReader, "application/json")
+}
+
+// requestRaw sends a request with a caller-supplied Content-Type (e.g. multipart uploads).
+func (c *Client) requestRaw(ctx context.Context, method, path string, bodyReader io.Reader, contentType string) ([]byte, error) {
+	return c.doRequest(ctx, method, path, nil, bodyReader, contentType)
+}
+
+func (c *Client) doRequest(ctx context.Context, method string, path string, values url.Values, bodyReader io.Reader, contentType string) ([]byte, error) {
 	u, err := url.Parse(c.baseURL + "/api/latest" + path)
 	if err != nil {
 		return nil, apperr.Wrap(apperr.CodeKaitenAPI, "build Kaiten request url", err, nil)
@@ -237,7 +305,9 @@ func (c *Client) request(ctx context.Context, method string, path string, values
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

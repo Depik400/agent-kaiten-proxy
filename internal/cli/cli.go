@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Depik400/agent-kaiten-proxy/internal/apperr"
 	"github.com/Depik400/agent-kaiten-proxy/internal/config"
@@ -97,6 +98,12 @@ func run(args []string, stdin io.Reader, stdout io.Writer, skills map[string]str
 		return runUpdateCard(args[1:], stdout)
 	case "comment-card":
 		return runCommentCard(args[1:], stdout)
+	case "card-files":
+		return runCardFiles(args[1:], stdout)
+	case "attach-file":
+		return runAttachFile(args[1:], stdout)
+	case "read-file":
+		return runReadFile(args[1:], stdout)
 	case "install-skill":
 		return runInstallSkill(args[1:], stdout, skills)
 	default:
@@ -913,6 +920,233 @@ func runCommentCard(args []string, stdout io.Writer) error {
 	return output.JSON(stdout, comment)
 }
 
+// maxTextFileBytes caps both uploads and downloads handled as text.
+const maxTextFileBytes = 5 << 20
+
+func runCardFiles(args []string, stdout io.Writer) error {
+	fs := newFlagSet("card-files")
+	idText := fs.String("id", "", "card id")
+	hostName := fs.String("host-name", "", "configured host name")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	id, err := parsePositiveInt("id", *idText)
+	if err != nil {
+		return err
+	}
+	client, _, err := clientForHost(*hostName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	files, err := client.CardFiles(ctx, id)
+	if err != nil {
+		return err
+	}
+	return output.JSON(stdout, files)
+}
+
+func runAttachFile(args []string, stdout io.Writer) error {
+	fs := newFlagSet("attach-file")
+	idText := fs.String("id", "", "card id")
+	filePath := fs.String("file", "", "path to a local text file")
+	name := fs.String("name", "", "attachment name (defaults to the file base name)")
+	hostName := fs.String("host-name", "", "configured host name")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	id, err := parsePositiveInt("id", *idText)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(*filePath) == "" {
+		return apperr.New(apperr.CodeInvalidArgs, "--file is required", nil)
+	}
+	info, err := os.Stat(*filePath)
+	if err != nil {
+		return apperr.Wrap(apperr.CodeInvalidArgs, "read file", err, map[string]string{"file": *filePath})
+	}
+	if info.IsDir() {
+		return apperr.New(apperr.CodeInvalidArgs, "--file is a directory", map[string]string{"file": *filePath})
+	}
+	if info.Size() > maxTextFileBytes {
+		return apperr.New(apperr.CodeInvalidArgs, "file is too large for a text attachment", map[string]any{"file": *filePath, "size": info.Size(), "max_bytes": maxTextFileBytes})
+	}
+	content, err := os.ReadFile(*filePath)
+	if err != nil {
+		return apperr.Wrap(apperr.CodeInvalidArgs, "read file", err, map[string]string{"file": *filePath})
+	}
+	if !isTextual(content) {
+		return apperr.New(apperr.CodeInvalidArgs, "only text files are supported for now", map[string]string{"file": *filePath})
+	}
+	attachName := strings.TrimSpace(*name)
+	if attachName == "" {
+		attachName = filepath.Base(*filePath)
+	}
+	client, _, err := clientForHost(*hostName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	file, err := client.AttachFile(ctx, id, attachName, content)
+	if err != nil {
+		return err
+	}
+	return output.JSON(stdout, file)
+}
+
+func runReadFile(args []string, stdout io.Writer) error {
+	fs := newFlagSet("read-file")
+	idText := fs.String("id", "", "card id")
+	fileIDText := fs.String("file-id", "", "attached file id")
+	name := fs.String("name", "", "attached file name to match")
+	maxBytes := fs.Int("max-bytes", maxTextFileBytes, "reject files larger than this")
+	hostName := fs.String("host-name", "", "configured host name")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	id, err := parsePositiveInt("id", *idText)
+	if err != nil {
+		return err
+	}
+	if *fileIDText == "" && strings.TrimSpace(*name) == "" {
+		return apperr.New(apperr.CodeInvalidArgs, "--file-id or --name is required", nil)
+	}
+	if *fileIDText != "" && strings.TrimSpace(*name) != "" {
+		return apperr.New(apperr.CodeInvalidArgs, "use only one of --file-id or --name", nil)
+	}
+	client, _, err := clientForHost(*hostName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	files, err := client.CardFiles(ctx, id)
+	if err != nil {
+		return err
+	}
+	meta, err := selectCardFile(files, *fileIDText, *name)
+	if err != nil {
+		return err
+	}
+	var fileURL, fileName string
+	var fileSize int
+	{
+		var f struct {
+			URL  string `json:"url"`
+			Name string `json:"name"`
+			Size int    `json:"size"`
+		}
+		_ = json.Unmarshal(meta, &f)
+		fileURL, fileName, fileSize = f.URL, f.Name, f.Size
+	}
+	if fileURL == "" {
+		return apperr.New(apperr.CodeKaitenAPI, "file has no download url", map[string]string{"name": fileName})
+	}
+	if fileSize > 0 && fileSize > *maxBytes {
+		return apperr.New(apperr.CodeInvalidArgs, "file is larger than --max-bytes", map[string]any{"name": fileName, "size": fileSize, "max_bytes": *maxBytes})
+	}
+	content, contentType, err := client.DownloadFile(ctx, fileURL)
+	if err != nil {
+		return err
+	}
+	if len(content) > *maxBytes {
+		return apperr.New(apperr.CodeInvalidArgs, "file is larger than --max-bytes", map[string]any{"name": fileName, "size": len(content), "max_bytes": *maxBytes})
+	}
+	if !isTextual(content) {
+		return apperr.New(apperr.CodeInvalidArgs, "file is not a text file", map[string]any{"name": fileName, "content_type": contentType})
+	}
+	return output.JSON(stdout, map[string]any{
+		"file":     meta,
+		"encoding": "utf-8",
+		"bytes":    len(content),
+		"content":  string(content),
+	})
+}
+
+// selectCardFile finds one file object by id or by name (exact ci match, else unique substring).
+func selectCardFile(files []json.RawMessage, fileIDText, name string) (json.RawMessage, error) {
+	if fileIDText != "" {
+		wantID, err := parsePositiveInt("file-id", fileIDText)
+		if err != nil {
+			return nil, err
+		}
+		for _, raw := range files {
+			var f struct {
+				ID int `json:"id"`
+			}
+			if err := json.Unmarshal(raw, &f); err != nil {
+				return nil, apperr.Wrap(apperr.CodeKaitenAPI, "decode file", err, nil)
+			}
+			if f.ID == wantID {
+				return raw, nil
+			}
+		}
+		return nil, apperr.New(apperr.CodeNotFound, "file id not found on card", map[string]any{"file_id": wantID})
+	}
+	want := strings.ToLower(strings.TrimSpace(name))
+	var exact, partial []json.RawMessage
+	var available []string
+	for _, raw := range files {
+		var f struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, apperr.Wrap(apperr.CodeKaitenAPI, "decode file", err, nil)
+		}
+		available = append(available, f.Name)
+		switch fn := strings.ToLower(strings.TrimSpace(f.Name)); {
+		case fn == want:
+			exact = append(exact, raw)
+		case want != "" && strings.Contains(fn, want):
+			partial = append(partial, raw)
+		}
+	}
+	picked := exact
+	if len(picked) == 0 {
+		picked = partial
+	}
+	if len(picked) == 0 {
+		return nil, apperr.New(apperr.CodeNotFound, "file name not found on card", map[string]any{"query": name, "available": available})
+	}
+	if len(picked) > 1 {
+		return nil, apperr.New(apperr.CodeInvalidArgs, "file name is ambiguous", map[string]any{"query": name, "available": available})
+	}
+	return picked[0], nil
+}
+
+// isTextual reports whether content can be treated as a UTF-8 text file:
+// no NUL bytes, valid UTF-8, and few non-printable control characters.
+func isTextual(content []byte) bool {
+	if len(content) == 0 {
+		return true
+	}
+	if bytesIndexZero(content) {
+		return false
+	}
+	if !utf8.Valid(content) {
+		return false
+	}
+	control := 0
+	for _, b := range content {
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' && b != '\f' && b != '\v' {
+			control++
+		}
+	}
+	return control*100 <= len(content) // <= 1% control bytes
+}
+
+func bytesIndexZero(b []byte) bool {
+	for _, c := range b {
+		if c == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func runInstallSkill(args []string, stdout io.Writer, skills map[string]string) error {
 	fs := newFlagSet("install-skill")
 	targetDir := fs.String("target-dir", "", "explicit skills directory (overrides --codex/--claude)")
@@ -1345,6 +1579,9 @@ Commands:
   create-card    Create a card on any board, lane and column.
   update-card    Update a card, including moving it between lanes and columns.
   comment-card   Add a card comment.
+  card-files     List files attached to a card.
+  attach-file    Attach a local text file to a card.
+  read-file      Read the text content of a file attached to a card.
   install-skill  Install the embedded skills into Codex and Claude.
 `
 
@@ -1364,6 +1601,20 @@ var commandHelp = map[string]string{
 `,
 	"card-history": `Usage:
   agent-kaiten-proxy card-history --id <card_id>
+`,
+	"card-files": `Usage:
+  agent-kaiten-proxy card-files --id <card_id>
+`,
+	"attach-file": `Usage:
+  agent-kaiten-proxy attach-file --id <card_id> --file <path> [--name <attachment name>]
+
+Only text files are supported for now (valid UTF-8, no NUL bytes, up to 5 MiB).
+`,
+	"read-file": `Usage:
+  agent-kaiten-proxy read-file --id <card_id> (--file-id <id> | --name <file name>) [--max-bytes <n>]
+
+Downloads one attached file and prints {"file": <meta>, "content": <text>}.
+Rejects non-text files. --name matches by exact (case-insensitive) name, else a unique substring.
 `,
 	"lanes": `Usage:
   agent-kaiten-proxy lanes [--board-id <id>|--board <alias>]

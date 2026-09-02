@@ -342,6 +342,127 @@ func TestCreateCardRejectsLaneNameWithLaneID(t *testing.T) {
 	}
 }
 
+func TestCardFiles(t *testing.T) {
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/api/latest/cards/50/files" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `[{"id":9,"name":"notes.md","url":"https://files.example/notes"}]`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	out := runOK(t, []string{"card-files", "--id", "50"})
+	if !bytes.Contains(out, []byte(`"notes.md"`)) {
+		t.Fatalf("card-files output: %s", out)
+	}
+}
+
+func TestAttachFileUploadsText(t *testing.T) {
+	var gotName, gotBody string
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/latest/cards/50/files" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("parse multipart: %v", err)
+		}
+		fh := r.MultipartForm.File["file"][0]
+		gotName = fh.Filename
+		f, _ := fh.Open()
+		data, _ := io.ReadAll(f)
+		gotBody = string(data)
+		return cliJSONResponse(http.StatusOK, `{"id":9,"name":"notes.md"}`), nil
+	})
+	defer restore()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "notes.md")
+	if err := os.WriteFile(src, []byte("# hello\ntext body\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	out := runOK(t, []string{"attach-file", "--id", "50", "--file", src})
+	if !bytes.Contains(out, []byte(`"id": 9`)) {
+		t.Fatalf("attach-file output: %s", out)
+	}
+	if gotName != "notes.md" || gotBody != "# hello\ntext body\n" {
+		t.Fatalf("uploaded name=%q body=%q", gotName, gotBody)
+	}
+}
+
+func TestAttachFileRejectsBinary(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "blob.bin")
+	if err := os.WriteFile(src, []byte{0x00, 0x01, 0x02, 0xff}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"attach-file", "--id", "50", "--file", src}, bytes.NewReader(nil), &stdout, &stderr, map[string]string{})
+	if code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("only text files")) {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestReadFileByName(t *testing.T) {
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.URL.Path == "/api/latest/cards/50/files":
+			return cliJSONResponse(http.StatusOK, `[{"id":9,"name":"notes.md","url":"https://files.example/notes","size":11}]`), nil
+		case r.URL.Host == "files.example" && r.URL.Path == "/notes":
+			return cliJSONResponse(http.StatusOK, `hello world`), nil
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.String())
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	out := runOK(t, []string{"read-file", "--id", "50", "--name", "notes"})
+	var data struct {
+		Content string `json:"content"`
+		Bytes   int    `json:"bytes"`
+	}
+	if err := json.Unmarshal(out, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Content != "hello world" || data.Bytes != 11 {
+		t.Fatalf("read-file output: %s", out)
+	}
+}
+
+func TestReadFileRejectsBinaryContent(t *testing.T) {
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.URL.Path == "/api/latest/cards/50/files":
+			return cliJSONResponse(http.StatusOK, `[{"id":9,"name":"blob.bin","url":"https://files.example/blob"}]`), nil
+		case r.URL.Host == "files.example":
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(bytes.NewReader([]byte{0x00, 0x01, 0x02}))}, nil
+		default:
+			t.Fatalf("unexpected %s", r.URL.String())
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"read-file", "--id", "50", "--file-id", "9"}, bytes.NewReader(nil), &stdout, &stderr, map[string]string{})
+	if code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
 func TestUpdateCardRequiresField(t *testing.T) {
 	path := writeTestConfig(t, "https://example.kaiten.ru")
 	t.Setenv(config.EnvKey, path)

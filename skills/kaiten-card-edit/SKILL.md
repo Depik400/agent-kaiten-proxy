@@ -1,6 +1,6 @@
 ---
 name: kaiten-card-edit
-description: Create and edit Kaiten cards through the local agent-kaiten-proxy CLI — put a card on any space, board, lane and column, and apply corrections to an existing card (title, description, responsible, owner, or move it between lanes and columns). Use whenever the user wants to add a task to Kaiten or fix an existing card.
+description: Create and edit Kaiten cards through the local agent-kaiten-proxy CLI — put a card on any space, board, lane and column, apply corrections to an existing card (title, description, responsible, owner, or move it between lanes and columns), and attach or read text files on a card. Use whenever the user wants to add a task to Kaiten, fix an existing card, or work with a card's attachments.
 ---
 
 # Kaiten Card Create & Edit
@@ -101,9 +101,43 @@ agent-kaiten-proxy update-card --id <card_id> --board-id <board_id> --lane-name 
 
 At least one editable field is required. The command prints the updated card JSON.
 
+## Files (text only)
+
+Only text files are supported for now: valid UTF-8, no NUL bytes, up to 5 MiB. Binary files are rejected with an error.
+
+List files on a card:
+
+```bash
+agent-kaiten-proxy card-files --id <card_id>
+```
+
+Each entry has `id`, `name`, `url`, `size`, `created`, author info.
+
+Attach a local text file (write operation — confirm with the user first):
+
+```bash
+agent-kaiten-proxy attach-file --id <card_id> --file ./path/to/notes.md
+agent-kaiten-proxy attach-file --id <card_id> --file ./log.txt --name "run-log.txt"
+```
+
+Read the text content of a file that is already attached to a card:
+
+```bash
+agent-kaiten-proxy read-file --id <card_id> --name notes.md
+agent-kaiten-proxy read-file --id <card_id> --file-id 12345
+```
+
+`read-file` prints `{"file": <meta>, "encoding": "utf-8", "bytes": <n>, "content": "<text>"}`.
+`--name` matches by exact (case-insensitive) name, otherwise a unique substring; an ambiguous or
+missing name returns an error listing the available names. Use `card-files` first to see them.
+A non-text file (or one larger than `--max-bytes`, default 5 MiB) is rejected — do not try to
+work around it.
+
 ## Rules
 
 - Never guess space, board, lane or column ids. Resolve them from `boards`, `lanes`, `columns` output or from a URL the user gave.
 - Always echo the resolved board / lane / column titles to the user and get a confirmation before running `create-card` or `update-card`.
 - If a `--lane-name` / `--column-name` lookup fails, do not fall back to a guess — show the `available` titles from the error and ask the user which one.
+- Only text files can be attached or read for now. State this plainly if the user asks for a binary file.
+- `attach-file` is a write operation — confirm the target card and file with the user before running it.
 - For reading cards, comments or history use the `kaiten-proxy`, `kaiten-card-comments` and `kaiten-card-history` skills.

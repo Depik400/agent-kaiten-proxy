@@ -102,6 +102,21 @@ agent-kaiten-proxy comment-card --id 123 --text "Investigated by agent"
 match, otherwise a unique substring match; subcolumn titles are matched too). An ambiguous or
 missing name returns an error listing the available titles.
 
+### Files (text only)
+
+Attach and read card files. Only text files are supported for now (valid UTF-8, no NUL bytes, up to 5 MiB).
+
+```bash
+agent-kaiten-proxy card-files --id 123
+agent-kaiten-proxy attach-file --id 123 --file ./notes.md
+agent-kaiten-proxy attach-file --id 123 --file ./log.txt --name run-log.txt
+agent-kaiten-proxy read-file --id 123 --name notes.md
+agent-kaiten-proxy read-file --id 123 --file-id 4567 --max-bytes 1048576
+```
+
+`read-file` prints `{"file": <meta>, "encoding": "utf-8", "bytes": <n>, "content": "<text>"}` and
+rejects non-text files.
+
 ## Install the Skills
 
 ```bash
