@@ -104,6 +104,14 @@ func run(args []string, stdin io.Reader, stdout io.Writer, skills map[string]str
 		return runAttachFile(args[1:], stdout)
 	case "read-file":
 		return runReadFile(args[1:], stdout)
+	case "users":
+		return runUsers(args[1:], stdout)
+	case "card-members":
+		return runCardMembers(args[1:], stdout)
+	case "add-member":
+		return runAddMember(args[1:], stdout)
+	case "remove-member":
+		return runRemoveMember(args[1:], stdout)
 	case "install-skill":
 		return runInstallSkill(args[1:], stdout, skills)
 	default:
@@ -757,6 +765,294 @@ func cardBoardID(ctx context.Context, client *kaiten.Client, id int) (int, error
 	return data.BoardID, nil
 }
 
+// stringList is a repeatable string flag (-flag a -flag b).
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+func runUsers(args []string, stdout io.Writer) error {
+	fs := newFlagSet("users")
+	query := fs.String("query", "", "name, username or email substring")
+	hostName := fs.String("host-name", "", "configured host name")
+	limit := fs.Int("limit", 50, "max users to print")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	client, _, err := clientForHost(*hostName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	users, err := client.ListUsers(ctx)
+	if err != nil {
+		return err
+	}
+	if q := strings.ToLower(strings.TrimSpace(*query)); q != "" {
+		filtered := make([]json.RawMessage, 0, len(users))
+		for _, raw := range users {
+			if userMatchesQuery(raw, q) {
+				filtered = append(filtered, raw)
+			}
+		}
+		users = filtered
+	}
+	if *limit > 0 && len(users) > *limit {
+		users = users[:*limit]
+	}
+	return output.JSON(stdout, users)
+}
+
+func runCardMembers(args []string, stdout io.Writer) error {
+	fs := newFlagSet("card-members")
+	idText := fs.String("id", "", "card id")
+	hostName := fs.String("host-name", "", "configured host name")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	id, err := parsePositiveInt("id", *idText)
+	if err != nil {
+		return err
+	}
+	client, _, err := clientForHost(*hostName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	members, err := client.CardMembers(ctx, id)
+	if err != nil {
+		return err
+	}
+	return output.JSON(stdout, members)
+}
+
+func runAddMember(args []string, stdout io.Writer) error {
+	fs := newFlagSet("add-member")
+	idText := fs.String("id", "", "card id")
+	userIDText := fs.String("user-id", "", "user id")
+	userName := fs.String("user-name", "", "user name/email to resolve")
+	hostName := fs.String("host-name", "", "configured host name")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	id, err := parsePositiveInt("id", *idText)
+	if err != nil {
+		return err
+	}
+	client, _, err := clientForHost(*hostName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	userID, err := resolveMemberArg(ctx, client, *userIDText, *userName)
+	if err != nil {
+		return err
+	}
+	if _, err := client.AddCardMember(ctx, id, userID); err != nil {
+		return err
+	}
+	members, err := client.CardMembers(ctx, id)
+	if err != nil {
+		return err
+	}
+	return output.JSON(stdout, map[string]any{"status": "ok", "card_id": id, "user_id": userID, "members": members})
+}
+
+func runRemoveMember(args []string, stdout io.Writer) error {
+	fs := newFlagSet("remove-member")
+	idText := fs.String("id", "", "card id")
+	userIDText := fs.String("user-id", "", "user id")
+	userName := fs.String("user-name", "", "user name/email to resolve")
+	hostName := fs.String("host-name", "", "configured host name")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	id, err := parsePositiveInt("id", *idText)
+	if err != nil {
+		return err
+	}
+	client, _, err := clientForHost(*hostName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	userID, err := resolveMemberArg(ctx, client, *userIDText, *userName)
+	if err != nil {
+		return err
+	}
+	if err := client.RemoveCardMember(ctx, id, userID); err != nil {
+		return err
+	}
+	members, err := client.CardMembers(ctx, id)
+	if err != nil {
+		return err
+	}
+	return output.JSON(stdout, map[string]any{"status": "ok", "card_id": id, "user_id": userID, "members": members})
+}
+
+func resolveMemberArg(ctx context.Context, client *kaiten.Client, userIDText, userName string) (int, error) {
+	if userIDText != "" && strings.TrimSpace(userName) != "" {
+		return 0, apperr.New(apperr.CodeInvalidArgs, "use only one of --user-id or --user-name", nil)
+	}
+	if userIDText != "" {
+		return parsePositiveInt("user-id", userIDText)
+	}
+	if strings.TrimSpace(userName) == "" {
+		return 0, apperr.New(apperr.CodeInvalidArgs, "--user-id or --user-name is required", nil)
+	}
+	return resolveUserID(ctx, client, userName)
+}
+
+// checkUserNameConflicts rejects combining an id flag with the matching name flag.
+func checkUserNameConflicts(responsibleIDText, responsibleName, ownerIDText, ownerName string) error {
+	if responsibleIDText != "" && strings.TrimSpace(responsibleName) != "" {
+		return apperr.New(apperr.CodeInvalidArgs, "use only one of --responsible-id or --responsible-name", nil)
+	}
+	if ownerIDText != "" && strings.TrimSpace(ownerName) != "" {
+		return apperr.New(apperr.CodeInvalidArgs, "use only one of --owner-id or --owner-name", nil)
+	}
+	return nil
+}
+
+func resolveUserNameFlags(ctx context.Context, client *kaiten.Client, input map[string]any, responsibleName, ownerName string) error {
+	if strings.TrimSpace(responsibleName) != "" {
+		id, err := resolveUserID(ctx, client, responsibleName)
+		if err != nil {
+			return err
+		}
+		input["responsible_id"] = id
+	}
+	if strings.TrimSpace(ownerName) != "" {
+		id, err := resolveUserID(ctx, client, ownerName)
+		if err != nil {
+			return err
+		}
+		input["owner_id"] = id
+	}
+	return nil
+}
+
+// collectMemberIDs turns --member-id and --member-name flags into a unique, ordered id list.
+func collectMemberIDs(ctx context.Context, client *kaiten.Client, memberIDs, memberNames stringList) ([]int, error) {
+	seen := map[int]bool{}
+	out := make([]int, 0, len(memberIDs)+len(memberNames))
+	for _, s := range memberIDs {
+		id, err := parsePositiveInt("member-id", s)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for _, q := range memberNames {
+		id, err := resolveUserID(ctx, client, q)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+func addCardMembers(ctx context.Context, client *kaiten.Client, cardID int, memberIDs []int) error {
+	for _, uid := range memberIDs {
+		if _, err := client.AddCardMember(ctx, cardID, uid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type kaitenUser struct {
+	ID       int    `json:"id"`
+	FullName string `json:"full_name"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+}
+
+func userMatchesQuery(raw json.RawMessage, lowerQuery string) bool {
+	var u kaitenUser
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return false
+	}
+	for _, field := range []string{u.FullName, u.Username, u.Email} {
+		if strings.Contains(strings.ToLower(field), lowerQuery) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveUserID finds exactly one user id by email/name/username.
+// Exact email wins, then exact full name or username, then a unique substring match.
+func resolveUserID(ctx context.Context, client *kaiten.Client, query string) (int, error) {
+	want := strings.ToLower(strings.TrimSpace(query))
+	if want == "" {
+		return 0, apperr.New(apperr.CodeInvalidArgs, "user query is empty", nil)
+	}
+	users, err := client.ListUsers(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var exactEmail, exactName, partial []kaitenUser
+	for _, raw := range users {
+		var u kaitenUser
+		if err := json.Unmarshal(raw, &u); err != nil || u.ID == 0 {
+			continue
+		}
+		email := strings.ToLower(strings.TrimSpace(u.Email))
+		name := strings.ToLower(strings.TrimSpace(u.FullName))
+		username := strings.ToLower(strings.TrimSpace(u.Username))
+		switch {
+		case email == want:
+			exactEmail = append(exactEmail, u)
+		case name == want || username == want:
+			exactName = append(exactName, u)
+		case strings.Contains(name, want) || strings.Contains(username, want) || strings.Contains(email, want):
+			partial = append(partial, u)
+		}
+	}
+	picked := exactEmail
+	if len(picked) == 0 {
+		picked = exactName
+	}
+	if len(picked) == 0 {
+		picked = partial
+	}
+	if len(picked) == 0 {
+		return 0, apperr.New(apperr.CodeNotFound, "user not found", map[string]any{"query": query})
+	}
+	if len(picked) > 1 {
+		return 0, apperr.New(apperr.CodeInvalidArgs, "user query is ambiguous", map[string]any{"query": query, "matched": userSummaries(picked)})
+	}
+	return picked[0].ID, nil
+}
+
+func userSummaries(users []kaitenUser) []map[string]any {
+	const max = 20
+	out := make([]map[string]any, 0, len(users))
+	for i, u := range users {
+		if i >= max {
+			break
+		}
+		out = append(out, map[string]any{"id": u.ID, "full_name": u.FullName, "email": u.Email})
+	}
+	return out
+}
+
 func runCreateCard(args []string, stdout io.Writer) error {
 	fs := newFlagSet("create-card")
 	hostName := fs.String("host-name", "", "configured host name")
@@ -770,13 +1066,21 @@ func runCreateCard(args []string, stdout io.Writer) error {
 	title := fs.String("title", "", "card title")
 	description := fs.String("description", "", "card description")
 	responsibleIDText := fs.String("responsible-id", "", "responsible user id")
+	responsibleName := fs.String("responsible-name", "", "responsible user name/email to resolve")
 	ownerIDText := fs.String("owner-id", "", "owner user id")
+	ownerName := fs.String("owner-name", "", "owner user name/email to resolve")
+	var memberIDs, memberNames stringList
+	fs.Var(&memberIDs, "member-id", "member user id (repeatable)")
+	fs.Var(&memberNames, "member-name", "member user name/email to resolve (repeatable)")
 	position := fs.String("position", "", "first or last")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if *title == "" {
 		return apperr.New(apperr.CodeInvalidArgs, "--title is required", nil)
+	}
+	if err := checkUserNameConflicts(*responsibleIDText, *responsibleName, *ownerIDText, *ownerName); err != nil {
+		return err
 	}
 	target, cfg, err := resolveTarget(*hostName, "", "", *boardIDText, *boardAlias, *laneIDText, *laneAlias)
 	if err != nil {
@@ -792,7 +1096,7 @@ func runCreateCard(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	columnID := 0
 	if err := resolveLaneColumnNames(ctx, client, target.BoardID, *laneName, *columnName, &target.LaneID, &columnID); err != nil {
@@ -808,9 +1112,28 @@ func runCreateCard(args []string, stdout io.Writer) error {
 	if err := addOptionalCardFields(input, *columnIDText, *description, *responsibleIDText, *ownerIDText, *position); err != nil {
 		return err
 	}
+	if err := resolveUserNameFlags(ctx, client, input, *responsibleName, *ownerName); err != nil {
+		return err
+	}
+	members, err := collectMemberIDs(ctx, client, memberIDs, memberNames)
+	if err != nil {
+		return err
+	}
 	card, err := client.CreateCard(ctx, input)
 	if err != nil {
 		return err
+	}
+	if len(members) > 0 {
+		cardID, err := kaiten.CardID(card)
+		if err != nil {
+			return err
+		}
+		if err := addCardMembers(ctx, client, cardID, members); err != nil {
+			return err
+		}
+		if fresh, err := client.GetCard(ctx, cardID); err == nil {
+			card = fresh
+		}
 	}
 	return output.JSON(stdout, card)
 }
@@ -829,12 +1152,20 @@ func runUpdateCard(args []string, stdout io.Writer) error {
 	title := fs.String("title", "", "card title")
 	description := fs.String("description", "", "card description")
 	responsibleIDText := fs.String("responsible-id", "", "responsible user id")
+	responsibleName := fs.String("responsible-name", "", "responsible user name/email to resolve")
 	ownerIDText := fs.String("owner-id", "", "owner user id")
+	ownerName := fs.String("owner-name", "", "owner user name/email to resolve")
+	var memberIDs, memberNames stringList
+	fs.Var(&memberIDs, "member-id", "member user id to add (repeatable)")
+	fs.Var(&memberNames, "member-name", "member user name/email to add (repeatable)")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
 	id, err := parsePositiveInt("id", *idText)
 	if err != nil {
+		return err
+	}
+	if err := checkUserNameConflicts(*responsibleIDText, *responsibleName, *ownerIDText, *ownerName); err != nil {
 		return err
 	}
 	target, cfg, err := resolveTarget(*hostName, "", "", *boardIDText, *boardAlias, *laneIDText, *laneAlias)
@@ -848,7 +1179,7 @@ func runUpdateCard(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	columnID := 0
 	if *laneName != "" || *columnName != "" {
@@ -882,12 +1213,32 @@ func runUpdateCard(args []string, stdout io.Writer) error {
 	if err := addOptionalCardFields(input, *columnIDText, "", *responsibleIDText, *ownerIDText, ""); err != nil {
 		return err
 	}
-	if len(input) == 0 {
-		return apperr.New(apperr.CodeInvalidArgs, "at least one editable field is required", nil)
+	if err := resolveUserNameFlags(ctx, client, input, *responsibleName, *ownerName); err != nil {
+		return err
 	}
-	card, err := client.UpdateCard(ctx, id, input)
+	members, err := collectMemberIDs(ctx, client, memberIDs, memberNames)
 	if err != nil {
 		return err
+	}
+	if len(input) == 0 && len(members) == 0 {
+		return apperr.New(apperr.CodeInvalidArgs, "at least one editable field is required", nil)
+	}
+	var card json.RawMessage
+	if len(input) > 0 {
+		card, err = client.UpdateCard(ctx, id, input)
+		if err != nil {
+			return err
+		}
+	}
+	if len(members) > 0 {
+		if err := addCardMembers(ctx, client, id, members); err != nil {
+			return err
+		}
+	}
+	if card == nil || len(members) > 0 {
+		if fresh, err := client.GetCard(ctx, id); err == nil {
+			card = fresh
+		}
 	}
 	return output.JSON(stdout, card)
 }
@@ -1619,12 +1970,16 @@ Commands:
   boards         Print boards for a space.
   lanes          Print lanes for a board.
   columns        Print columns for a board.
+  users          Print company users, optionally filtered by --query.
   create-card    Create a card on any board, lane and column.
   update-card    Update a card, including moving it between lanes and columns.
   comment-card   Add a card comment, optionally with a text file attached.
   card-files     List files attached to a card.
   attach-file    Attach a local text file to a card.
   read-file      Read the text content of a file attached to a card.
+  card-members   List members of a card.
+  add-member     Add a member to a card.
+  remove-member  Remove a member from a card.
   install-skill  Install the embedded skills into Codex and Claude.
 `
 
@@ -1673,16 +2028,35 @@ Rejects non-text files. --name matches by exact (case-insensitive) name, else a 
 	"columns": `Usage:
   agent-kaiten-proxy columns [--board-id <id>|--board <alias>]
 `,
+	"users": `Usage:
+  agent-kaiten-proxy users [--query "<name|username|email>"] [--limit <n>]
+
+--query is a case-insensitive substring matched against full_name, username and email.
+`,
+	"card-members": `Usage:
+  agent-kaiten-proxy card-members --id <card_id>
+`,
+	"add-member": `Usage:
+  agent-kaiten-proxy add-member --id <card_id> (--user-id <id> | --user-name "<name|email>")
+`,
+	"remove-member": `Usage:
+  agent-kaiten-proxy remove-member --id <card_id> (--user-id <id> | --user-name "<name|email>")
+`,
 	"create-card": `Usage:
-  agent-kaiten-proxy create-card (--board-id <id>|--board <alias>) (--lane-id <id>|--lane <alias>|--lane-name "<title>") --title "<title>" [--description "<text>"] [--column-id <id>|--column-name "<title>"] [--responsible-id <id>] [--owner-id <id>] [--position first|last]
+  agent-kaiten-proxy create-card (--board-id <id>|--board <alias>) (--lane-id <id>|--lane <alias>|--lane-name "<title>") --title "<title>" [--description "<text>"] [--column-id <id>|--column-name "<title>"] [--responsible-id <id>|--responsible-name "<name|email>"] [--owner-id <id>|--owner-name "<name|email>"] [--member-id <id> ...] [--member-name "<name|email>" ...] [--position first|last]
 
 --lane-name and --column-name are matched against the board's lanes/columns by title
 (exact case-insensitive match, otherwise a unique substring match).
+--responsible-name/--owner-name/--member-name resolve a user by exact email, then exact
+full name or username, then a unique substring. --member-id/--member-name are repeatable
+and are added to the card after it is created.
 `,
 	"update-card": `Usage:
-  agent-kaiten-proxy update-card --id <card_id> [--title "<title>"] [--description "<text>"] [--board-id <id>|--board <alias>] [--lane-id <id>|--lane <alias>|--lane-name "<title>"] [--column-id <id>|--column-name "<title>"] [--responsible-id <id>] [--owner-id <id>]
+  agent-kaiten-proxy update-card --id <card_id> [--title "<title>"] [--description "<text>"] [--board-id <id>|--board <alias>] [--lane-id <id>|--lane <alias>|--lane-name "<title>"] [--column-id <id>|--column-name "<title>"] [--responsible-id <id>|--responsible-name "<name|email>"] [--owner-id <id>|--owner-name "<name|email>"] [--member-id <id> ...] [--member-name "<name|email>" ...]
 
 --lane-name/--column-name resolve against the card's current board when --board-id/--board is omitted.
+--member-id/--member-name are repeatable and are added to the card (they do not remove existing members;
+use remove-member for that). A members-only update needs no other editable field.
 `,
 	"install-skill": `Usage:
   agent-kaiten-proxy install-skill [--target-dir <dir>] [--codex] [--claude]

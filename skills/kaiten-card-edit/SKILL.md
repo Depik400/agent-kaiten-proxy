@@ -1,6 +1,6 @@
 ---
 name: kaiten-card-edit
-description: Create and edit Kaiten cards through the local agent-kaiten-proxy CLI — put a card on any space, board, lane and column, apply corrections to an existing card (title, description, responsible, owner, or move it between lanes and columns), and attach or read text files on a card. Use whenever the user wants to add a task to Kaiten, fix an existing card, or work with a card's attachments.
+description: Create and edit Kaiten cards through the local agent-kaiten-proxy CLI — put a card on any space, board, lane and column, apply corrections to an existing card (title, description, responsible, owner, members, or move it between lanes and columns), manage card members, and attach or read text files on a card. Use whenever the user wants to add a task to Kaiten, fix an existing card, change who is responsible or participating, or work with a card's attachments.
 ---
 
 # Kaiten Card Create & Edit
@@ -69,12 +69,38 @@ Equivalent with ids:
 agent-kaiten-proxy create-card --board-id <board_id> --lane-id <lane_id> --column-id <column_id> --title "<title>"
 ```
 
-Optional flags: `--responsible-id <id>`, `--owner-id <id>`, `--position first|last`.
+Optional flags: `--responsible-id <id>` / `--responsible-name "<name|email>"`, `--owner-id <id>` / `--owner-name "<name|email>"`, `--member-id <id>` and `--member-name "<name|email>"` (both repeatable), `--position first|last`.
 A board alias works in place of `--board-id`: `--board <alias>`. A saved lane alias works as `--lane <alias>`.
 
 `--title` is required. `board` and a `lane` (id, alias, or name) are required. Column is optional — omit it to use the board's default first column.
 
 The command prints the created card JSON. Report the new card id and its URL to the user.
+
+### Responsible, owner and members
+
+Resolve people from plain text with the `users` command, then pass ids — or let the CLI resolve a name/email for you:
+
+```bash
+agent-kaiten-proxy users --query "kononov"
+
+agent-kaiten-proxy create-card --board-id <board_id> --lane-id <lane_id> --title "<title>" \
+  --responsible-name "pavel@example.com" \
+  --member-name "Anna Ivanova" --member-id 456
+```
+
+`--responsible-name` / `--owner-name` / `--member-name` match a user by exact email, then exact
+full name or username, then a unique substring; an ambiguous query returns an error listing the
+candidates. `--member-id` / `--member-name` are repeatable and are added to the card **after** it
+is created (they never remove existing members).
+
+Manage members of an existing card directly:
+
+```bash
+agent-kaiten-proxy card-members --id <card_id>
+agent-kaiten-proxy add-member --id <card_id> --user-name "Anna Ivanova"
+agent-kaiten-proxy add-member --id <card_id> --user-id 456
+agent-kaiten-proxy remove-member --id <card_id> --user-id 456
+```
 
 ## Editing a card
 
@@ -84,7 +110,12 @@ Apply only the fields the user asked to change:
 agent-kaiten-proxy update-card --id <card_id> --description "<new description>"
 agent-kaiten-proxy update-card --id <card_id> --title "<new title>"
 agent-kaiten-proxy update-card --id <card_id> --responsible-id <id> --owner-id <id>
+agent-kaiten-proxy update-card --id <card_id> --responsible-name "Pavel Kononov" --member-name anna
 ```
+
+`update-card` accepts the same `--responsible-name` / `--owner-name` / `--member-id` / `--member-name`
+flags as `create-card`. A members-only change (just `--member-*`) needs no other field. Members are
+only added — use `remove-member` to drop one.
 
 Move a card between lanes / columns. `--lane-name` and `--column-name` resolve against the card's **current board** when you do not pass `--board-id`/`--board`:
 

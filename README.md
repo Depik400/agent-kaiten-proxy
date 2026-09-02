@@ -47,6 +47,7 @@ agent-kaiten-proxy spaces
 agent-kaiten-proxy boards --space-id 1
 agent-kaiten-proxy lanes --board-id 10
 agent-kaiten-proxy columns --board-id 10
+agent-kaiten-proxy users --query kononov
 
 agent-kaiten-proxy alias-space set --alias product --space-id 1
 agent-kaiten-proxy alias-board set --alias main --space-id 1 --board-id 10
@@ -90,10 +91,15 @@ agent-kaiten-proxy create-card --board-id 1040055 --lane-name "Павел Кон
 # Raw ids
 agent-kaiten-proxy create-card --board-id 1040055 --lane-id 22 --column-id 7 --title "Bug title"
 
+# Responsible and members, resolved by name/email (or pass numeric ids)
+agent-kaiten-proxy create-card --board-id 1040055 --lane-id 22 --title "Bug title" \
+  --responsible-name "pavel@example.com" --member-name "Anna Ivanova" --member-id 456
+
 # Edit a card / move it between lanes and columns (names resolve on the card's current board)
 agent-kaiten-proxy update-card --id 123 --description "Updated details"
 agent-kaiten-proxy update-card --id 123 --column-name "IN PROGRESS"
 agent-kaiten-proxy update-card --id 123 --board-id 1040055 --lane-name "Павел Кононов" --column-name "TO DO"
+agent-kaiten-proxy update-card --id 123 --responsible-name "Pavel Kononov" --member-name anna
 
 agent-kaiten-proxy comment-card --id 123 --text "Investigated by agent"
 agent-kaiten-proxy comment-card --id 123 --text "Log attached" --file ./run.log
@@ -103,6 +109,20 @@ agent-kaiten-proxy comment-card --id 123 --file-id 4567
 `--lane-name` / `--column-name` match a lane or column title on the board (exact case-insensitive
 match, otherwise a unique substring match; subcolumn titles are matched too). An ambiguous or
 missing name returns an error listing the available titles.
+
+`--responsible-name` / `--owner-name` / `--member-name` resolve a user via `users`: exact email
+first, then exact full name or username, then a unique substring. `--member-id` / `--member-name`
+are repeatable; members are added after the card is created/updated and never removed — use
+`remove-member` for that.
+
+### Members
+
+```bash
+agent-kaiten-proxy card-members --id 123
+agent-kaiten-proxy add-member --id 123 --user-name "Anna Ivanova"
+agent-kaiten-proxy add-member --id 123 --user-id 456
+agent-kaiten-proxy remove-member --id 123 --user-id 456
+```
 
 ### Files (text only)
 

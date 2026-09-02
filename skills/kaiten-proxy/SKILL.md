@@ -133,6 +133,16 @@ agent-kaiten-proxy read-file --id <card_id> --name notes.md
 agent-kaiten-proxy comment-card --id <card_id> --text "<comment>" --file ./notes.md
 ```
 
+Find users and manage the responsible / members of a card:
+
+```bash
+agent-kaiten-proxy users --query "<name|email>"
+agent-kaiten-proxy card-members --id <card_id>
+agent-kaiten-proxy add-member --id <card_id> --user-name "<name|email>"
+agent-kaiten-proxy remove-member --id <card_id> --user-id <id>
+agent-kaiten-proxy update-card --id <card_id> --responsible-name "<name|email>" --member-name "<name>"
+```
+
 The dedicated `kaiten-card-edit` skill covers creating and editing cards in detail (parsing a board URL, resolving lane/column by title, moving cards, attaching and reading text files).
 
 ## Safety

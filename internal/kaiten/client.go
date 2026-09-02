@@ -62,6 +62,31 @@ func (c *Client) VerifyToken(ctx context.Context) error {
 	return err
 }
 
+func (c *Client) ListUsers(ctx context.Context) ([]json.RawMessage, error) {
+	var users []json.RawMessage
+	if err := c.get(ctx, "/users", nil, &users); err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+func (c *Client) CardMembers(ctx context.Context, cardID int) ([]json.RawMessage, error) {
+	var members []json.RawMessage
+	if err := c.get(ctx, fmt.Sprintf("/cards/%d/members", cardID), nil, &members); err != nil {
+		return nil, err
+	}
+	return members, nil
+}
+
+func (c *Client) AddCardMember(ctx context.Context, cardID, userID int) (json.RawMessage, error) {
+	return c.postJSON(ctx, fmt.Sprintf("/cards/%d/members", cardID), map[string]any{"user_id": userID})
+}
+
+func (c *Client) RemoveCardMember(ctx context.Context, cardID, userID int) error {
+	_, err := c.request(ctx, http.MethodDelete, fmt.Sprintf("/cards/%d/members/%d", cardID, userID), nil, nil)
+	return err
+}
+
 func (c *Client) CurrentUser(ctx context.Context) (User, error) {
 	var user User
 	if err := c.get(ctx, "/users/current", nil, &user); err != nil {

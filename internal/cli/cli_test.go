@@ -342,6 +342,143 @@ func TestCreateCardRejectsLaneNameWithLaneID(t *testing.T) {
 	}
 }
 
+func TestUsersQueryFilters(t *testing.T) {
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/api/latest/users" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `[{"id":3,"full_name":"Pavel Kononov","username":"pavel","email":"pavel@x.io"},{"id":4,"full_name":"Anna Ivanova","username":"anna","email":"anna@x.io"}]`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	out := runOK(t, []string{"users", "--query", "kononov"})
+	if !bytes.Contains(out, []byte(`"id": 3`)) || bytes.Contains(out, []byte(`"id": 4`)) {
+		t.Fatalf("users filter output: %s", out)
+	}
+}
+
+func TestAddMemberByName(t *testing.T) {
+	var addBody map[string]any
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/latest/users":
+			return cliJSONResponse(http.StatusOK, `[{"id":3,"full_name":"Pavel Kononov","username":"pavel","email":"pavel@x.io"}]`), nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/latest/cards/5/members":
+			data, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(data, &addBody)
+			return cliJSONResponse(http.StatusOK, `{"status":"ok"}`), nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/latest/cards/5/members":
+			return cliJSONResponse(http.StatusOK, `[{"id":3,"full_name":"Pavel Kononov"}]`), nil
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	out := runOK(t, []string{"add-member", "--id", "5", "--user-name", "pavel@x.io"})
+	if addBody["user_id"] != float64(3) {
+		t.Fatalf("add member body = %#v", addBody)
+	}
+	if !bytes.Contains(out, []byte(`"user_id": 3`)) {
+		t.Fatalf("add-member output: %s", out)
+	}
+}
+
+func TestRemoveMember(t *testing.T) {
+	var deleted string
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodDelete:
+			deleted = r.URL.Path
+			return &http.Response{StatusCode: 204, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/latest/cards/5/members":
+			return cliJSONResponse(http.StatusOK, `[]`), nil
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	runOK(t, []string{"remove-member", "--id", "5", "--user-id", "9"})
+	if deleted != "/api/latest/cards/5/members/9" {
+		t.Fatalf("delete path = %s", deleted)
+	}
+}
+
+func TestCreateCardResolvesResponsibleAndMembers(t *testing.T) {
+	var cardBody map[string]any
+	var added []float64
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/latest/users":
+			return cliJSONResponse(http.StatusOK, `[{"id":3,"full_name":"Pavel Kononov","username":"pavel","email":"pavel@x.io"},{"id":4,"full_name":"Anna Ivanova","username":"anna","email":"anna@x.io"}]`), nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/latest/cards":
+			data, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(data, &cardBody)
+			return cliJSONResponse(http.StatusOK, `{"id":555,"title":"New"}`), nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/latest/cards/555/members":
+			data, _ := io.ReadAll(r.Body)
+			var b map[string]any
+			_ = json.Unmarshal(data, &b)
+			added = append(added, b["user_id"].(float64))
+			return cliJSONResponse(http.StatusOK, `{}`), nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/latest/cards/555":
+			return cliJSONResponse(http.StatusOK, `{"id":555,"members":[{"id":7},{"id":4}]}`), nil
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	runOK(t, []string{"create-card", "--board-id", "10", "--lane-id", "22", "--title", "New", "--responsible-name", "kononov", "--member-id", "7", "--member-name", "anna"})
+	if cardBody["responsible_id"] != float64(3) {
+		t.Fatalf("card body = %#v", cardBody)
+	}
+	if len(added) != 2 || added[0] != 7 || added[1] != 4 {
+		t.Fatalf("added members = %#v", added)
+	}
+}
+
+func TestUpdateCardMembersOnly(t *testing.T) {
+	patched := false
+	restore := stubClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPatch:
+			patched = true
+			return cliJSONResponse(http.StatusOK, `{}`), nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/latest/cards/5/members":
+			return cliJSONResponse(http.StatusOK, `{}`), nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/latest/cards/5":
+			return cliJSONResponse(http.StatusOK, `{"id":5,"members":[{"id":9}]}`), nil
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		return cliJSONResponse(http.StatusOK, `{}`), nil
+	})
+	defer restore()
+
+	path := writeTestConfig(t, "https://kaiten.test")
+	t.Setenv(config.EnvKey, path)
+	out := runOK(t, []string{"update-card", "--id", "5", "--member-id", "9"})
+	if patched {
+		t.Fatal("update-card should not PATCH when only members change")
+	}
+	if !bytes.Contains(out, []byte(`"members"`)) {
+		t.Fatalf("update-card output: %s", out)
+	}
+}
+
 func TestCommentCardWithFileUpload(t *testing.T) {
 	var commentBody map[string]any
 	restore := stubClient(func(r *http.Request) (*http.Response, error) {
